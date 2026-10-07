@@ -5,11 +5,13 @@
 #include <arch/qemu.h>
 #include <arch/selftest.h>
 #include <arch/serial.h>
+#include <arch/timer.h>
 #include <kernel/boot.h>
 #include <kernel/cmdline.h>
 #include <kernel/kprintf.h>
 #include <kernel/panic.h>
 #include <kernel/pmm.h>
+#include <kernel/sched.h>
 #include <kernel/selftest.h>
 
 static struct boot_info boot;
@@ -44,6 +46,29 @@ static void print_memory_map(void)
     kprintf("usable RAM: %lu MiB\n", usable >> 20);
 }
 
+/* First thread. Runs on its own stack, so the bootloader's memory can now
+ * be reclaimed, then runs the scheduler tests and any requested selftest. */
+static void kinit(void *arg)
+{
+    (void)arg;
+    kprintf("sched: running on thread '%s' (id %lu)\n",
+            thread_current()->name, thread_current()->id);
+    pmm_reclaim_bootloader(&boot);
+
+    sched_selftest_boot();
+
+    char test[32];
+    if (cmdline_get(boot.cmdline, "selftest", test, sizeof test)) {
+        kprintf("selftest: running '%s'\n", test);
+        if (!core_selftest_run(test) && !sched_selftest_run(test) &&
+            !arch_selftest_run(test))
+            panic("unknown selftest '%s'", test);
+    }
+
+    kprintf("kernel: init complete\n");
+    qemu_exit(0);
+}
+
 /* Entry point. Limine has put us in 64-bit long mode with paging on, the
  * kernel mapped at 0xffffffff80000000, all RAM mapped at hhdm_offset,
  * interrupts off and a 64 KiB stack. */
@@ -65,18 +90,11 @@ void kmain(void)
 
     pmm_init(&boot);
     paging_init(&boot);
+    sched_init();
 
     arch_selftest_boot();
     core_selftest_boot();
 
-    char test[32];
-    if (cmdline_get(boot.cmdline, "selftest", test, sizeof test)) {
-        kprintf("selftest: running '%s'\n", test);
-        if (!core_selftest_run(test) && !arch_selftest_run(test))
-            panic("unknown selftest '%s'", test);
-    }
-
-    kprintf("kernel: init complete\n");
-    qemu_exit(0);
-    cpu_halt_forever();
+    arch_timer_init(SCHED_HZ);
+    sched_start(kinit, NULL);   /* does not return */
 }

@@ -21,7 +21,29 @@ static inline void outl(uint16_t port, uint32_t val)
 }
 
 static inline void cpu_cli(void) { __asm__ volatile("cli" ::: "memory"); }
+static inline void cpu_sti(void) { __asm__ volatile("sti" ::: "memory"); }
 static inline void cpu_relax(void) { __asm__ volatile("pause"); }
+
+/* Enable interrupts and halt until the next one. `sti` takes effect only
+ * after the following instruction, so no interrupt can slip in between
+ * the two and leave us halted with nothing left to wake us. */
+static inline void cpu_idle(void) { __asm__ volatile("sti; hlt" ::: "memory"); }
+
+/* Disable interrupts and return the previous RFLAGS, so nested critical
+ * sections restore exactly the state they found. On one CPU, "interrupts
+ * off" is the kernel's lock. */
+static inline uint64_t irq_save(void)
+{
+    uint64_t flags;
+    __asm__ volatile("pushfq; popq %0; cli" : "=r"(flags) : : "memory");
+    return flags;
+}
+
+static inline void irq_restore(uint64_t flags)
+{
+    if (flags & (1ull << 9))   /* IF, the interrupt-enable flag */
+        cpu_sti();
+}
 
 /* Stop this CPU for good: interrupts off, then hlt forever. */
 __attribute__((noreturn)) static inline void cpu_halt_forever(void)

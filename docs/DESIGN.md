@@ -63,7 +63,7 @@ kernel/
   arch/x86_64/    everything x86-specific, incl. the only Limine-aware file;
                   headers used only inside arch/ (gdt.h, idt.h, trap.h) live here
   core/           portable kernel logic (main, panic, cmdline, pmm, slab,
-                  self-tests; later sched/ipc/cap)
+                  kstack, sched, self-tests; later ipc/cap)
   lib/            freestanding libc pieces (string, kprintf)
   include/arch/   interface core/ uses to reach arch code
   include/kernel/ core interfaces
@@ -93,10 +93,9 @@ Rule: `core/` never includes `<limine.h>` or uses inline asm; it goes through
   `trap_dispatch()` with the same `struct trap_frame` layout.
 - **Policy today**: `#BP` (breakpoint) prints and resumes; any other
   exception prints the cause, registers, control registers and a
-  frame-pointer backtrace, then panics. Vectors 32–255 panic because nothing
-  enables interrupts yet. The legacy 8259 PIC (Programmable Interrupt
-  Controller) stays masked as Limine leaves it; we go straight to the APIC
-  in M3. From M9, faults in user threads go to the supervisor instead.
+  frame-pointer backtrace, then panics. Of vectors 32–255, only the timer
+  (0x30) and spurious interrupts are expected (see M3); any other one
+  panics. From M9, faults in user threads go to the supervisor instead.
 - **RSP0**, the kernel stack the CPU loads when a ring-3 thread traps, is
   set per thread on context switch once user mode exists (M4).
 
@@ -109,10 +108,13 @@ case with a different kernel command line (`CMDLINE`, passed through
 `code*2+1`: 1 = normal finish, 3 = panic, 124 = timeout (hang or reboot).
 `panic()` calls `qemu_exit(1)` so failing cases end immediately.
 
-Destructive tests are selected with `selftest=<name>` (core tests in
-`core/selftest.c`, CPU tests in `arch/x86_64/selftest.c`). Every boot also
+Destructive tests are selected with `selftest=<name>` (memory tests in
+`core/selftest.c`, scheduler tests in `core/selftest_sched.c`, CPU tests in
+`arch/x86_64/selftest.c`). Every boot also
 runs the non-destructive ones: an `int3` round trip, and PMM, paging (incl.
-switching to a second address space) and slab checks.
+switching to a second address space) and slab checks from `kmain`, then
+from the init thread the scheduler checks: priority order, sleep length,
+preemption of two threads that never yield, and leak-free thread exit.
 
 ## Memory (M2)
 
@@ -136,10 +138,10 @@ switching to a second address space) and slab checks.
   aligned (most of the HHDM), 4 KiB elsewhere. 1 GiB pages aren't used.
 - **Frames**: PMM (physical memory manager) is a bitmap with one bit per
   4 KiB frame and a next-fit search. Frame 0 is never handed out, so 0 means
-  "no memory". Bootloader-reclaimable memory is still in use (Limine's
-  stack and boot data) and is handed to the PMM once the kernel runs on
-  its own stacks (M3). A buddy allocator comes later if a driver needs
-  physically contiguous buffers.
+  "no memory". Bootloader-reclaimable memory (Limine's page tables, stack
+  and boot data) is handed to the PMM once the kernel runs on its own
+  stacks, at the start of the init thread. A buddy allocator comes later
+  if a driver needs physically contiguous buffers.
 - **Kernel objects**: slab caches, one per object type (thread, endpoint,
   capability table). One slab = one 4 KiB page with a header at the start,
   so freeing finds the slab by rounding down. Free objects carry a magic
@@ -151,18 +153,47 @@ switching to a second address space) and slab checks.
 - Device memory (LAPIC, IOAPIC, HPET) is not in the HHDM; whoever needs it
   maps it uncached (`PAGE_UNCACHED`).
 
-## Threads and scheduling
+## Threads and scheduling (M3)
 
-- One kernel stack per thread; registers saved on it at trap entry.
-- 256 fixed priorities, round-robin within a priority, timeslice from the
-  LAPIC timer (calibrated against the PIT or HPET at boot).
-- **Direct switch on IPC**: when a thread `call`s a server that is waiting
-  in `recv`, switch straight to the server without going through the run
-  queue. This is the main L4 fast-path trick.
-- SMP is out of scope until after M9, but per-CPU data lives in a
-  `struct cpu` reached through `GS` from day one, and shared kernel
-  structures are only touched with interrupts disabled under a big kernel
-  lock, so adding cores later is a locking change, not a rewrite.
+- **Tick**: the LAPIC timer in periodic mode at 100 Hz (`SCHED_HZ`),
+  calibrated at boot against PIT (programmable interval timer) channel 2,
+  polled through port 0x61 so no interrupt is needed for calibration. The
+  legacy 8259 PIC is remapped to vectors 0x20–0x2f and fully masked; its
+  spurious interrupts are ignored. Timer = vector 0x30, LAPIC spurious =
+  0xff.
+- **Threads**: `struct thread` comes from a slab cache. Each thread has a
+  16 KiB kernel stack in a dedicated region (PML4 slot 510), one 32 KiB
+  slot per stack: 16 KiB unmapped guard below 16 KiB of stack. An overflow
+  hits the guard, the CPU can't push the page-fault frame there, and the
+  double fault is reported on its IST stack (`selftest=stack-overflow`).
+- **Context switch** (`switch.S`) saves only the callee-saved registers on
+  the old stack and swaps RSP. A new thread's stack is pre-built so the
+  first switch "returns" into a trampoline that calls `thread_entry()`.
+- **Policy**: 256 fixed priorities (255 highest). The highest-priority
+  ready thread runs; equal priorities round-robin in 2-tick (20 ms)
+  timeslices. A thread that becomes ready with higher priority than the
+  running one (created, or woken by the timer) preempts it immediately.
+  Run queues are one FIFO per priority plus a 256-bit bitmap, so picking
+  the next thread is constant time. The idle thread (priority 0, never
+  queued) runs `sti; hlt`.
+- **Where preemption happens**: only at the end of an interrupt, in
+  `sched_preempt_if_needed()`. The interrupted thread's trap frame stays on
+  its own kernel stack, so when it's picked again it simply returns from
+  the handler and `iretq`s. Voluntary switches happen in `thread_yield`,
+  `thread_sleep` and `thread_exit`.
+- **Locking**: one CPU, so disabling interrupts (`irq_save`/`irq_restore`)
+  is the lock. Every switch happens with interrupts off; each thread gets
+  its own interrupt state back when it resumes.
+- **Exit**: a dead thread can't free the stack it's running on, so the next
+  thread frees it right after the switch (`finish_switch`).
+- **Per-CPU data**: `struct cpu` (current, idle, need_resched, counters) is
+  reached through the GS base via `this_cpu()`, so adding CPUs later means
+  one `struct cpu` each plus real locks, not a rewrite.
+- **Boot handoff**: `sched_start()` switches from Limine's stack to the
+  `init` thread and never returns. Init then hands Limine's leftover memory
+  (its page tables, stack and boot data, about 1 MiB here) to the PMM.
+- Sleeping threads sit on one unsorted list scanned each tick. Fine for
+  tens of threads; a sorted list or timer wheel can come later.
 
 ## IPC
 
@@ -235,7 +266,7 @@ Debug-only `debug_putc` exists until the console server works.
 | **M0** | Boot via Limine, serial output, memory map | kernel boots in QEMU and prints the memory map ✅ |
 | **M1** | GDT/TSS, IDT, exception handlers | a deliberate #PF prints a register dump; a #DF on a broken stack is caught via IST ✅ |
 | **M2** | Frame allocator, page tables, kernel slab heap | kernel runs on its own PML4 (top-level page table) with W^X; second address space works ✅ |
-| M3 | LAPIC timer, kernel threads, scheduler | two kernel threads preempt each other |
+| **M3** | LAPIC timer, kernel threads, scheduler | two kernel threads that never yield share the CPU; stack overflow caught by guard page ✅ |
 | M4 | Ring 3, `syscall`/`sysret`, root task loaded | user program calls `debug_putc` |
 | M5 | Endpoints, notifications, capability tables | ping-pong between two user threads over IPC |
 | M6 | Root task spawns servers from a manifest | console server running in ring 3 |

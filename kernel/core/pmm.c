@@ -55,7 +55,7 @@ void pmm_init(const struct boot_info *boot)
 
     /* The bitmap covers everything up to the end of the highest region we
      * might ever hand out: usable RAM now, bootloader-reclaimable RAM once
-     * we stop using Limine's data (M3). */
+     * the init thread no longer needs Limine's data. */
     uint64_t top = 0;
     for (size_t i = 0; i < boot->region_count; i++) {
         const struct mem_region *r = &boot->regions[i];
@@ -94,6 +94,16 @@ void pmm_init(const struct boot_info *boot)
     kprintf("pmm: %lu frames tracked, %lu free (%lu MiB), bitmap %lu KiB at %p\n",
             total_frames, free_frames, (free_frames * PAGE_SIZE) >> 20,
             bitmap_bytes / 1024, (void *)bitmap_phys);
+}
+
+void pmm_reclaim_bootloader(const struct boot_info *boot)
+{
+    uint64_t before = free_frames;
+    for (size_t i = 0; i < boot->region_count; i++)
+        if (boot->regions[i].type == MEM_BOOTLOADER_RECLAIMABLE)
+            free_range(boot->regions[i].base, boot->regions[i].length);
+    kprintf("pmm: reclaimed %lu KiB of bootloader memory, %lu MiB free\n",
+            ((free_frames - before) * PAGE_SIZE) / 1024, (free_frames * PAGE_SIZE) >> 20);
 }
 
 uint64_t pmm_alloc(void)

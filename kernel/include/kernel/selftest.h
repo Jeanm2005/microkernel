@@ -7,3 +7,8 @@
  * if the name is not one of ours. */
 void core_selftest_boot(void);
 bool core_selftest_run(const char *name);
+
+/* Scheduler tests. These need running threads, so they are called from
+ * the init thread instead of from kmain(). */
+void sched_selftest_boot(void);
+bool sched_selftest_run(const char *name);

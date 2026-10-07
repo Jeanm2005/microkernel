@@ -3,6 +3,8 @@
 #include <arch/cpu.h>
 #include <kernel/kprintf.h>
 #include <kernel/panic.h>
+#include <kernel/sched.h>
+#include "lapic.h"
 #include "trap.h"
 
 enum {
@@ -93,19 +95,29 @@ static void fatal(const struct trap_frame *tf, const char *what)
 
 void trap_dispatch(struct trap_frame *tf)
 {
-    if (tf->vector == VEC_BREAKPOINT) {
+    uint64_t v = tf->vector;
+
+    if (v == VEC_BREAKPOINT) {
         /* #BP is a "trap": rip already points past the int3, so returning
          * resumes execution. Debuggers rely on this. */
         kprintf("trap: breakpoint at rip %p, resuming\n", (void *)(tf->rip - 1));
-        return;
-    }
-
-    if (tf->vector < 32) {
-        const char *name = exception_names[tf->vector];
+    } else if (v < 32) {
+        const char *name = exception_names[v];
         fatal(tf, name ? name : "RESERVED EXCEPTION");
+    } else if (v == VEC_TIMER) {
+        /* Acknowledge first: if the scheduler switches threads below, this
+         * handler doesn't finish until we switch back, and the LAPIC would
+         * hold back further ticks until then. */
+        lapic_eoi();
+        sched_timer_tick();
+    } else if (v == VEC_LAPIC_SPURIOUS || (v >= VEC_PIC_BASE && v < VEC_PIC_BASE + 16)) {
+        /* Spurious interrupts need no EOI and no handling. */
+    } else {
+        fatal(tf, "UNEXPECTED INTERRUPT");
     }
 
-    /* Nothing enables interrupts yet (the legacy PIC is masked by Limine
-     * and the APIC comes in M3), so any other vector is a bug. */
-    fatal(tf, "UNEXPECTED INTERRUPT");
+    /* The single place where an interrupted thread can lose the CPU. Its
+     * trap frame stays on its own kernel stack; when it is scheduled again
+     * it returns from here and `iretq`s back to what it was doing. */
+    sched_preempt_if_needed();
 }

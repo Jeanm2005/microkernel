@@ -49,6 +49,13 @@ run_case boot "" 1 \
     "selftest: running in a second address space" \
     "selftest: paging ok" \
     "selftest: slab ok" \
+    "timer: LAPIC at" \
+    "sched: running on thread 'init'" \
+    "pmm: reclaimed" \
+    "selftest: priority ok (order HIiL)" \
+    "selftest: sleep ok" \
+    "selftest: preemption ok" \
+    "selftest: thread reaping ok" \
     "kernel: init complete"
 
 run_case pagefault "selftest=pagefault" 3 \
@@ -70,6 +77,10 @@ run_case exec-data "selftest=exec-data" 3 \
 
 run_case slab-doublefree "selftest=slab-doublefree" 3 \
     "slab_free(doublefree): double free of"
+
+run_case stack-overflow "selftest=stack-overflow" 3 \
+    "*** DOUBLE FAULT (#DF)" \
+    "KERNEL PANIC"
 
 run_case unknown-selftest "selftest=nonsense" 3 \
     "unknown selftest 'nonsense'"

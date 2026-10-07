@@ -10,6 +10,11 @@
 
 void pmm_init(const struct boot_info *boot);
 
+/* Hand the bootloader's leftover memory (its page tables, stack and boot
+ * data) to the allocator. Only safe once nothing uses it any more: after
+ * the switch to our own page tables and our own stacks. */
+void pmm_reclaim_bootloader(const struct boot_info *boot);
+
 uint64_t pmm_alloc(void);          /* contents undefined */
 uint64_t pmm_alloc_zeroed(void);
 void     pmm_free(uint64_t frame);

@@ -7,7 +7,7 @@ can crash and be restarted without taking the system down.
 
 See [docs/DESIGN.md](docs/DESIGN.md) for the architecture and milestones.
 
-**Status:** M2 of 10 done.
+**Status:** M3 of 10 done.
 
 - M0: boots via Limine on QEMU, serial console, memory map
 - M1: own GDT (Global Descriptor Table), TSS (Task State Segment) and IDT
@@ -16,6 +16,8 @@ See [docs/DESIGN.md](docs/DESIGN.md) for the architecture and milestones.
 - M2: physical frame allocator, the kernel's own 4-level page tables with
   W^X (write xor execute) section permissions, separate address spaces,
   slab caches for kernel objects
+- M3: LAPIC (local APIC) timer, kernel threads with guard-paged stacks,
+  context switching, preemptive priority scheduler
 
 ## Build and run
 
@@ -30,6 +32,7 @@ make debug   # QEMU waits for GDB: gdb build/kernel.elf -ex 'target remote :1234
 make run CMDLINE="selftest=pagefault"     # watch a page-fault report
 make run CMDLINE="selftest=doublefault"   # watch a double fault caught on its own stack
 make run CMDLINE="selftest=write-text"    # writing to kernel code faults (W^X)
+make run CMDLINE="selftest=stack-overflow" # a thread overflows into its guard page
 ```
 
 The first build clones the Limine bootloader into `limine/`.
