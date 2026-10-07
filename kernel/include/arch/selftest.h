@@ -1,7 +1,9 @@
 #pragma once
 #include <stdbool.h>
 
-/* Non-destructive check run on every boot: raises a breakpoint exception
+/* CPU-level tests; portable memory tests are in kernel/selftest.h.
+ *
+ * Non-destructive check run on every boot: raises a breakpoint exception
  * (#BP) and verifies the handler returns to the next instruction. */
 void arch_selftest_boot(void);
 

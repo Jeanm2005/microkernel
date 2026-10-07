@@ -62,7 +62,8 @@ POSIX (the Unix API standard).
 kernel/
   arch/x86_64/    everything x86-specific, incl. the only Limine-aware file;
                   headers used only inside arch/ (gdt.h, idt.h, trap.h) live here
-  core/           portable kernel logic (main, panic, cmdline, later sched/ipc/cap/vm)
+  core/           portable kernel logic (main, panic, cmdline, pmm, slab,
+                  self-tests; later sched/ipc/cap)
   lib/            freestanding libc pieces (string, kprintf)
   include/arch/   interface core/ uses to reach arch code
   include/kernel/ core interfaces
@@ -108,24 +109,47 @@ case with a different kernel command line (`CMDLINE`, passed through
 `code*2+1`: 1 = normal finish, 3 = panic, 124 = timeout (hang or reboot).
 `panic()` calls `qemu_exit(1)` so failing cases end immediately.
 
-Destructive tests are selected with `selftest=<name>`. Every boot also runs
-a non-destructive `int3` round trip.
+Destructive tests are selected with `selftest=<name>` (core tests in
+`core/selftest.c`, CPU tests in `arch/x86_64/selftest.c`). Every boot also
+runs the non-destructive ones: an `int3` round trip, and PMM, paging (incl.
+switching to a second address space) and slab checks.
 
-## Memory
+## Memory (M2)
 
 - **Virtual layout** (per address space):
-  - `0x0000_0000_0000_0000 – 0x0000_7fff_ffff_ffff` user
-  - `0xffff_8000_0000_0000 – …` HHDM: direct map of all physical RAM
+  - `0x0000_0000_0000_0000 – 0x0000_7fff_ffff_ffff` user half (empty in
+    the kernel's own address space, so a stray low pointer always faults)
+  - `0xffff_8000_0000_0000 – …` HHDM: direct map of all RAM-like regions
+    (usable, bootloader-reclaimable, kernel, ACPI tables), read/write, NX
   - `0xffff_ffff_8000_0000 – …` kernel image
-  The upper half (PML4 entries 256–511) is shared by every address space.
-- **Frames**: bitmap allocator over `MEM_USABLE` regions to start; buddy
-  allocator later if fragmentation matters. Bootloader-reclaimable memory
-  is freed only after we stop using Limine's responses and page tables.
-- **Kernel heap**: fixed-size slab caches per kernel object type (TCB,
-  endpoint, cap table). No general `kmalloc` for user-controlled sizes, so
-  a user can't exhaust kernel memory with odd-sized requests.
+- **Kernel image permissions** follow W^X (write xor execute): `.text` is
+  read + execute, `.rodata` read-only, `.data/.bss` read/write + NX. The
+  linker script page-aligns each section so they can be mapped separately.
+  `selftest=write-text` and `selftest=exec-data` prove both directions.
+- **Shared kernel half**: `paging_init()` creates all 256 kernel-half
+  PDPTs (page directory pointer tables) up front, costing 1 MiB. The
+  kernel's PML4 entries then never change, so a new address space just
+  copies them, and nothing has to be synced later. Kernel-half pages are
+  marked global (CR4.PGE) so a CR3 switch doesn't flush them from the TLB
+  (translation lookaside buffer).
+- **Page sizes**: 2 MiB pages where physical and virtual addresses are both
+  aligned (most of the HHDM), 4 KiB elsewhere. 1 GiB pages aren't used.
+- **Frames**: PMM (physical memory manager) is a bitmap with one bit per
+  4 KiB frame and a next-fit search. Frame 0 is never handed out, so 0 means
+  "no memory". Bootloader-reclaimable memory is still in use (Limine's
+  stack and boot data) and is handed to the PMM once the kernel runs on
+  its own stacks (M3). A buddy allocator comes later if a driver needs
+  physically contiguous buffers.
+- **Kernel objects**: slab caches, one per object type (thread, endpoint,
+  capability table). One slab = one 4 KiB page with a header at the start,
+  so freeing finds the slab by rounding down. Free objects carry a magic
+  word, which catches double frees. Empty slabs go straight back to the
+  PMM. There is no general-purpose `kmalloc`, so user requests can never
+  make the kernel allocate odd-sized blocks.
 - **User memory**: granted as frame capabilities and mapped with `map()`.
-  No `mmap` / demand paging in the kernel; a user-space pager can add that.
+  No `mmap` or demand paging in the kernel; a user-space pager can add that.
+- Device memory (LAPIC, IOAPIC, HPET) is not in the HHDM; whoever needs it
+  maps it uncached (`PAGE_UNCACHED`).
 
 ## Threads and scheduling
 
@@ -210,7 +234,7 @@ Debug-only `debug_putc` exists until the console server works.
 |---|---|---|
 | **M0** | Boot via Limine, serial output, memory map | kernel boots in QEMU and prints the memory map ✅ |
 | **M1** | GDT/TSS, IDT, exception handlers | a deliberate #PF prints a register dump; a #DF on a broken stack is caught via IST ✅ |
-| M2 | Frame allocator, page tables, kernel slab heap | can build and switch to our own PML4 (top-level page table) |
+| **M2** | Frame allocator, page tables, kernel slab heap | kernel runs on its own PML4 (top-level page table) with W^X; second address space works ✅ |
 | M3 | LAPIC timer, kernel threads, scheduler | two kernel threads preempt each other |
 | M4 | Ring 3, `syscall`/`sysret`, root task loaded | user program calls `debug_putc` |
 | M5 | Endpoints, notifications, capability tables | ping-pong between two user threads over IPC |

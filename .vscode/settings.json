@@ -1,0 +1,8 @@
+{
+    // Turn off AI ghost-text / fill-in suggestions for this project only
+    "editor.inlineSuggest.enabled": false,
+    "github.copilot.enable": {
+        "*": false
+    },
+    "github.copilot.nextEditSuggestions.enabled": false
+}

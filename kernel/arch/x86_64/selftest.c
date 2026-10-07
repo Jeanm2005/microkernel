@@ -34,12 +34,34 @@ static void test_double_fault(void)
         ::: "memory");
 }
 
+/* Write to the kernel's own code. .text is mapped read-only + executable,
+ * so this must fault: proves W^X (write xor execute) is enforced. */
+static void test_write_text(void)
+{
+    volatile uint8_t *code = (volatile uint8_t *)(uintptr_t)&arch_selftest_boot;
+    kprintf("selftest: writing to kernel code at %p\n", (void *)code);
+    *code = 0xc3;
+}
+
+/* Jump into a writable data page holding a `ret` instruction. Data pages
+ * are mapped NX (no-execute), so the instruction fetch must fault. */
+static void test_exec_data(void)
+{
+    static uint8_t code[16] = { 0xc3 };   /* ret */
+    kprintf("selftest: calling into data at %p\n", (void *)code);
+    ((void (*)(void))(uintptr_t)code)();
+}
+
 bool arch_selftest_run(const char *name)
 {
     if (strcmp(name, "pagefault") == 0)
         test_page_fault();
     else if (strcmp(name, "doublefault") == 0)
         test_double_fault();
+    else if (strcmp(name, "write-text") == 0)
+        test_write_text();
+    else if (strcmp(name, "exec-data") == 0)
+        test_exec_data();
     else
         return false;
     panic("selftest '%s' returned; it should have crashed", name);

@@ -44,6 +44,11 @@ run_case() {
 run_case boot "" 1 \
     "cpu: GDT, TSS and IDT loaded" \
     "selftest: breakpoint handled and resumed" \
+    "paging: kernel page tables active" \
+    "selftest: pmm ok" \
+    "selftest: running in a second address space" \
+    "selftest: paging ok" \
+    "selftest: slab ok" \
     "kernel: init complete"
 
 run_case pagefault "selftest=pagefault" 3 \
@@ -54,6 +59,17 @@ run_case pagefault "selftest=pagefault" 3 \
 run_case doublefault "selftest=doublefault" 3 \
     "*** DOUBLE FAULT (#DF)" \
     "KERNEL PANIC"
+
+run_case write-text "selftest=write-text" 3 \
+    "cause: write to a protected page" \
+    "KERNEL PANIC"
+
+run_case exec-data "selftest=exec-data" 3 \
+    "cause: instruction fetch from a protected page" \
+    "KERNEL PANIC"
+
+run_case slab-doublefree "selftest=slab-doublefree" 3 \
+    "slab_free(doublefree): double free of"
 
 run_case unknown-selftest "selftest=nonsense" 3 \
     "unknown selftest 'nonsense'"

@@ -1,6 +1,7 @@
 #include <stdint.h>
 #include <arch/cpu.h>
 #include <arch/init.h>
+#include <arch/paging.h>
 #include <arch/qemu.h>
 #include <arch/selftest.h>
 #include <arch/serial.h>
@@ -8,6 +9,8 @@
 #include <kernel/cmdline.h>
 #include <kernel/kprintf.h>
 #include <kernel/panic.h>
+#include <kernel/pmm.h>
+#include <kernel/selftest.h>
 
 static struct boot_info boot;
 
@@ -60,12 +63,16 @@ void kmain(void)
     kprintf("cmdline: \"%s\"\n", boot.cmdline);
     print_memory_map();
 
+    pmm_init(&boot);
+    paging_init(&boot);
+
     arch_selftest_boot();
+    core_selftest_boot();
 
     char test[32];
     if (cmdline_get(boot.cmdline, "selftest", test, sizeof test)) {
         kprintf("selftest: running '%s'\n", test);
-        if (!arch_selftest_run(test))
+        if (!core_selftest_run(test) && !arch_selftest_run(test))
             panic("unknown selftest '%s'", test);
     }
 
