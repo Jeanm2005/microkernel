@@ -13,6 +13,7 @@
 #include <kernel/pmm.h>
 #include <kernel/sched.h>
 #include <kernel/selftest.h>
+#include <kernel/string.h>
 
 static struct boot_info boot;
 
@@ -31,6 +32,14 @@ const char *mem_type_name(enum mem_type t)
     return t < sizeof names / sizeof names[0] ? names[t] : "?";
 }
 
+const struct boot_module *boot_find_module(const struct boot_info *b, const char *name)
+{
+    for (size_t i = 0; i < b->module_count; i++)
+        if (strcmp(b->modules[i].name, name) == 0)
+            return &b->modules[i];
+    return NULL;
+}
+
 static void print_memory_map(void)
 {
     uint64_t usable = 0;
@@ -47,7 +56,8 @@ static void print_memory_map(void)
 }
 
 /* First thread. Runs on its own stack, so the bootloader's memory can now
- * be reclaimed, then runs the scheduler tests and any requested selftest. */
+ * be reclaimed, then runs the scheduler and user-mode tests and any
+ * requested selftest. */
 static void kinit(void *arg)
 {
     (void)arg;
@@ -56,12 +66,13 @@ static void kinit(void *arg)
     pmm_reclaim_bootloader(&boot);
 
     sched_selftest_boot();
+    user_selftest_boot(&boot);
 
     char test[32];
     if (cmdline_get(boot.cmdline, "selftest", test, sizeof test)) {
         kprintf("selftest: running '%s'\n", test);
         if (!core_selftest_run(test) && !sched_selftest_run(test) &&
-            !arch_selftest_run(test))
+            !user_selftest_run(test, &boot) && !arch_selftest_run(test))
             panic("unknown selftest '%s'", test);
     }
 
@@ -87,6 +98,9 @@ void kmain(void)
             (void *)boot.hhdm_offset);
     kprintf("cmdline: \"%s\"\n", boot.cmdline);
     print_memory_map();
+    for (size_t i = 0; i < boot.module_count; i++)
+        kprintf("module: %s, %lu bytes at %p\n", boot.modules[i].name,
+                boot.modules[i].size, (void *)boot.modules[i].phys);
 
     pmm_init(&boot);
     paging_init(&boot);

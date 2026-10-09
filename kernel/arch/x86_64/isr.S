@@ -31,7 +31,13 @@ isr_stub_table:
 
     .section .text
 isr_common:
-    /* TODO(M4): if we came from ring 3, `swapgs` here and before iretq. */
+    /* From ring 3, GS base is still the user's: swap in the kernel's.
+     * At this point 24(%rsp) is the CS the CPU pushed (above the vector,
+     * the error code and RIP); its low 2 bits are the old privilege level. */
+    testb $3, 24(%rsp)
+    jz 1f
+    swapgs
+1:
     cld
     pushq %rax
     pushq %rbx
@@ -71,6 +77,10 @@ isr_common:
     popq %rbx
     popq %rax
     addq $16, %rsp          /* drop vector and error code */
+    testb $3, 8(%rsp)       /* returning to ring 3? (CS is now at 8(%rsp)) */
+    jz 2f
+    swapgs
+2:
     iretq
 
     /* Tell the linker this file doesn't need an executable stack. */

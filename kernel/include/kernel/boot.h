@@ -23,6 +23,15 @@ struct mem_region {
 
 #define BOOT_MAX_REGIONS 128
 #define BOOT_CMDLINE_MAX 256
+#define BOOT_MAX_MODULES 8
+
+/* A file the bootloader loaded next to the kernel (e.g. the root task).
+ * It sits in MEM_KERNEL_AND_MODULES memory, which is never reclaimed. */
+struct boot_module {
+    char     name[64];   /* file name without directories, e.g. "root.elf" */
+    uint64_t phys;
+    uint64_t size;
+};
 
 struct boot_info {
     uint64_t hhdm_offset;          /* virt = phys + hhdm_offset for all RAM */
@@ -31,7 +40,12 @@ struct boot_info {
     char     cmdline[BOOT_CMDLINE_MAX];  /* "" if none was given */
     size_t   region_count;
     struct mem_region regions[BOOT_MAX_REGIONS];
+    size_t   module_count;
+    struct boot_module modules[BOOT_MAX_MODULES];
 };
+
+/* The module called `name`, or NULL. */
+const struct boot_module *boot_find_module(const struct boot_info *boot, const char *name);
 
 /* Fills `out` from the bootloader's responses. Panics if a required
  * response is missing. */

@@ -1,3 +1,4 @@
+#include <stddef.h>
 #include <arch/context.h>
 #include <arch/cpu.h>
 #include <arch/percpu.h>
@@ -5,7 +6,13 @@
 #include <kernel/panic.h>
 #include "gdt.h"
 
-#define MSR_GS_BASE 0xc0000101
+#define MSR_GS_BASE        0xc0000101
+#define MSR_KERNEL_GS_BASE 0xc0000102   /* swapped with GS base by `swapgs` */
+
+/* syscall_entry.S hard-codes these offsets. */
+_Static_assert(offsetof(struct cpu, self) == 0, "cpu.self offset");
+_Static_assert(offsetof(struct cpu, user_rsp) == 8, "cpu.user_rsp offset");
+_Static_assert(offsetof(struct cpu, kernel_rsp) == 16, "cpu.kernel_rsp offset");
 
 extern char thread_trampoline[];
 
@@ -29,13 +36,17 @@ uint64_t arch_context_init(uint64_t stack_top, void (*fn)(void *), void *arg)
 
 void arch_set_kernel_stack(uint64_t stack_top)
 {
-    tss_set_kernel_stack(stack_top);
+    tss_set_kernel_stack(stack_top);      /* for interrupts from ring 3 */
+    this_cpu()->kernel_rsp = stack_top;   /* for syscall_entry */
 }
 
+/* In the kernel, GS base points at our struct cpu. User code gets its own
+ * GS base (0 for now). Every entry from ring 3 (interrupt or syscall) does
+ * `swapgs`, which exchanges GS base with KERNEL_GS_BASE, and every return
+ * to ring 3 swaps back, so user code never sees the kernel pointer. */
 void arch_percpu_init(struct cpu *c)
 {
     c->self = c;
-    /* TODO(M4): once user mode exists, user code must not see this, so
-     * trap entry from ring 3 will `swapgs` between user and kernel GS. */
     wrmsr(MSR_GS_BASE, (uint64_t)c);
+    wrmsr(MSR_KERNEL_GS_BASE, 0);
 }

@@ -21,9 +21,11 @@ uint64_t paging_kernel_root(void);
 
 /* New address space: empty lower (user) half, shared kernel upper half. */
 uint64_t paging_new_root(void);
-/* Free the page tables of a root made by paging_new_root(). Does not free
- * the frames that were mapped in it; their owner does that. */
-void paging_destroy_root(uint64_t root);
+/* Free the user-half page tables of a root made by paging_new_root(), and
+ * the root itself. With `free_frames`, also free every frame mapped in the
+ * user half (for an address space that owns all its memory). Must not be
+ * the active root. */
+void paging_destroy_root(uint64_t root, bool free_frames);
 void paging_activate(uint64_t root);
 
 /* Map one 4 KiB page. Returns false if `virt` is already mapped or a page
@@ -39,3 +41,9 @@ bool paging_map_range(uint64_t root, uint64_t virt, uint64_t phys,
  * that was mapped, or 0 if nothing was. */
 uint64_t paging_unmap(uint64_t root, uint64_t virt);
 bool paging_translate(uint64_t root, uint64_t virt, uint64_t *phys_out);
+
+/* True if user mode could access the whole range [virt, virt + len) in
+ * `root` (and write it, if `write`): every page present, user-accessible
+ * and, for writes, writable. The kernel checks this before touching any
+ * pointer a system call hands it. */
+bool paging_user_range_ok(uint64_t root, uint64_t virt, uint64_t len, bool write);

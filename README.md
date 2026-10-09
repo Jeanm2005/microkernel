@@ -7,7 +7,7 @@ can crash and be restarted without taking the system down.
 
 See [docs/DESIGN.md](docs/DESIGN.md) for the architecture and milestones.
 
-**Status:** M3 of 10 done.
+**Status:** M4 of 10 done.
 
 - M0: boots via Limine on QEMU, serial console, memory map
 - M1: own GDT (Global Descriptor Table), TSS (Task State Segment) and IDT
@@ -18,6 +18,8 @@ See [docs/DESIGN.md](docs/DESIGN.md) for the architecture and milestones.
   slab caches for kernel objects
 - M3: LAPIC (local APIC) timer, kernel threads with guard-paged stacks,
   context switching, preemptive priority scheduler
+- M4: user mode: ELF loader, `syscall` entry, a root task loaded as a boot
+  module; a faulting user process is killed and the kernel keeps running
 
 ## Build and run
 
@@ -33,6 +35,7 @@ make run CMDLINE="selftest=pagefault"     # watch a page-fault report
 make run CMDLINE="selftest=doublefault"   # watch a double fault caught on its own stack
 make run CMDLINE="selftest=write-text"    # writing to kernel code faults (W^X)
 make run CMDLINE="selftest=stack-overflow" # a thread overflows into its guard page
+make run CMDLINE="selftest=user-pagefault" # a user process crashes; the kernel survives
 ```
 
 The first build clones the Limine bootloader into `limine/`.

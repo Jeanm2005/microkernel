@@ -9,10 +9,12 @@
  * word checks no matter how many threads exist. */
 #include <arch/context.h>
 #include <arch/cpu.h>
+#include <arch/paging.h>
 #include <arch/percpu.h>
 #include <kernel/kprintf.h>
 #include <kernel/kstack.h>
 #include <kernel/panic.h>
+#include <kernel/process.h>
 #include <kernel/sched.h>
 #include <kernel/slab.h>
 #include <kernel/string.h>
@@ -75,6 +77,10 @@ static int highest_ready_priority(void)
 static void reap(struct thread *t)
 {
     kstack_free(t->kstack_top);
+    if (t->proc) {
+        t->proc->run_ticks = t->run_ticks;
+        process_thread_gone(t->proc);   /* its address space is inactive now */
+    }
     slab_free(&thread_cache, t);
 }
 
@@ -112,6 +118,19 @@ static void schedule(void)
     c->prev = prev;
     c->switches++;
     arch_set_kernel_stack(next->kstack_top);
+
+    /* User threads run in their process's address space; kernel threads
+     * in any (the kernel half is the same everywhere), so we only reload
+     * CR3 when a user thread needs a different one. Kernel threads keep
+     * whatever is loaded, which saves a TLB flush. A dead process's
+     * address space is only freed after we've left it (see reap). */
+    uint64_t root = next->proc ? next->proc->root : c->active_root;
+    if (prev->state == THREAD_DEAD && prev->proc && root == prev->proc->root)
+        root = paging_kernel_root();
+    if (root != c->active_root) {
+        paging_activate(root);
+        c->active_root = root;
+    }
     arch_context_switch(&prev->saved_rsp, next->saved_rsp);
 
     /* We're back: some later schedule() switched to `prev` again. */
@@ -152,13 +171,8 @@ static struct thread *thread_alloc(const char *name, void (*fn)(void *), void *a
     return t;
 }
 
-struct thread *thread_create(const char *name, void (*fn)(void *), void *arg,
-                             uint8_t priority)
+static struct thread *start_thread(struct thread *t)
 {
-    struct thread *t = thread_alloc(name, fn, arg, priority);
-    if (!t)
-        return NULL;
-
     uint64_t flags = irq_save();
     enqueue(t);
     struct thread *cur = this_cpu()->current;
@@ -170,6 +184,23 @@ struct thread *thread_create(const char *name, void (*fn)(void *), void *arg,
     }
     irq_restore(flags);
     return t;
+}
+
+struct thread *thread_create(const char *name, void (*fn)(void *), void *arg,
+                             uint8_t priority)
+{
+    struct thread *t = thread_alloc(name, fn, arg, priority);
+    return t ? start_thread(t) : NULL;
+}
+
+struct thread *thread_create_user(const char *name, void (*fn)(void *), void *arg,
+                                  uint8_t priority, struct process *proc)
+{
+    struct thread *t = thread_alloc(name, fn, arg, priority);
+    if (!t)
+        return NULL;
+    t->proc = proc;
+    return start_thread(t);
 }
 
 void thread_exit(void)
@@ -274,6 +305,7 @@ static void idle_loop(void *arg)
 void sched_init(void)
 {
     arch_percpu_init(&cpu0);
+    cpu0.active_root = paging_kernel_root();
     slab_cache_init(&thread_cache, "thread", sizeof(struct thread));
 }
 

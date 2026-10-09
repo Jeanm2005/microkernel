@@ -3,6 +3,7 @@
 #include <arch/cpu.h>
 #include <kernel/kprintf.h>
 #include <kernel/panic.h>
+#include <kernel/process.h>
 #include <kernel/sched.h>
 #include "lapic.h"
 #include "trap.h"
@@ -85,11 +86,18 @@ static void fatal(const struct trap_frame *tf, const char *what)
     if (tf->vector == VEC_PAGE_FAULT)
         explain_page_fault(tf);
     dump_registers(tf);
+
+    if (from_user(tf)) {
+        /* A user program broke, not the kernel: report it, end that one
+         * process, and carry on. (No backtrace: user frame pointers are
+         * untrusted, and the kernel shouldn't chase them.) In M9 the
+         * process's supervisor gets told instead, so it can restart it. */
+        process_kill_current(what);
+    }
+
     kprintf("  backtrace:\n");
     kprintf("    %p\n", (void *)tf->rip);
     backtrace_print(tf->rbp);
-    /* TODO(M9): a fault in a user thread should go to its supervisor
-     * instead of stopping the kernel. */
     panic("unhandled %s", what);
 }
 

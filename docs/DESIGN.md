@@ -61,16 +61,24 @@ POSIX (the Unix API standard).
 ```
 kernel/
   arch/x86_64/    everything x86-specific, incl. the only Limine-aware file;
-                  headers used only inside arch/ (gdt.h, idt.h, trap.h) live here
+                  headers used only inside arch/ (gdt.h, idt.h, trap.h,
+                  lapic.h) live here
   core/           portable kernel logic (main, panic, cmdline, pmm, slab,
-                  kstack, sched, self-tests; later ipc/cap)
+                  kstack, sched, process, elf, syscall, self-tests;
+                  later ipc/cap)
   lib/            freestanding libc pieces (string, kprintf)
   include/arch/   interface core/ uses to reach arch code
   include/kernel/ core interfaces
   linker.ld
+include/abi/      what the kernel and user programs share: syscall numbers,
+                  error codes (no kernel internals)
+user/
+  lib/            user runtime: crt0 (_start), syscall wrappers, printf
+  root/           the root task
+  linker.ld       user programs load at 0x400000
 scripts/test.sh   boot-and-check test runner (`make test`)
 docs/DESIGN.md
-limine.conf
+limine.conf       also loads user/root.elf as a boot module
 ```
 
 Rule: `core/` never includes `<limine.h>` or uses inline asm; it goes through
@@ -97,7 +105,7 @@ Rule: `core/` never includes `<limine.h>` or uses inline asm; it goes through
   (0x30) and spurious interrupts are expected (see M3); any other one
   panics. From M9, faults in user threads go to the supervisor instead.
 - **RSP0**, the kernel stack the CPU loads when a ring-3 thread traps, is
-  set per thread on context switch once user mode exists (M4).
+  set in the TSS on every context switch (M3/M4).
 
 ## Testing
 
@@ -109,12 +117,17 @@ case with a different kernel command line (`CMDLINE`, passed through
 `panic()` calls `qemu_exit(1)` so failing cases end immediately.
 
 Destructive tests are selected with `selftest=<name>` (memory tests in
-`core/selftest.c`, scheduler tests in `core/selftest_sched.c`, CPU tests in
-`arch/x86_64/selftest.c`). Every boot also
-runs the non-destructive ones: an `int3` round trip, and PMM, paging (incl.
-switching to a second address space) and slab checks from `kmain`, then
-from the init thread the scheduler checks: priority order, sleep length,
-preemption of two threads that never yield, and leak-free thread exit.
+`core/selftest.c`, scheduler tests in `core/selftest_sched.c`, user tests
+in `core/selftest_user.c`, CPU tests in `arch/x86_64/selftest.c`). The
+user tests are the exception: the kernel must survive them, so they end
+with status 1. Every boot also runs the non-destructive ones: an `int3`
+round trip, and PMM, paging (incl. switching to a second address space)
+and slab checks from `kmain`; then from the init thread the scheduler
+checks (priority order, sleep length, preemption of two threads that never
+yield, leak-free thread exit) and the root task, which checks its own
+privilege level and syscall error handling, then computes for 10^9 cycles
+without syscalls while a kernel thread competes for the CPU. Its exit code
+and a leak check on its memory are verified.
 
 ## Memory (M2)
 
@@ -195,6 +208,51 @@ preemption of two threads that never yield, and leak-free thread exit.
 - Sleeping threads sit on one unsorted list scanned each tick. Fine for
   tens of threads; a sorted list or timer wheel can come later.
 
+## User mode (M4)
+
+- **Processes**: a process is an address space plus (for now) one thread.
+  `thread->proc` tells the scheduler which page-table root to load; kernel
+  threads run on whatever is loaded, since the kernel half is the same
+  everywhere, which avoids needless TLB flushes.
+- **Loading**: the root task is an ordinary static ELF that Limine loads as
+  a boot module. The kernel's ELF loader treats it as untrusted: every
+  offset and size is bounds-checked, segments must lie in the user half
+  (above the never-mapped null page), and a segment that is both writable
+  and executable is refused, so W^X holds for user code too. Each page gets
+  a fresh zeroed frame. The user stack is 16 KiB just below the top of the
+  user half, with unmapped pages on both sides.
+- **Entering ring 3**: `arch_enter_user()` builds an `iretq` frame (user CS
+  0x23, SS 0x1b, interrupts on), zeroes every register but the argument so
+  no kernel values leak, and does `swapgs`.
+- **GS discipline**: in the kernel, GS base points at `struct cpu`; in user
+  mode it is the user's own (0). Every entry from ring 3 (interrupt stubs
+  check the saved CS; `syscall` always comes from ring 3) does `swapgs`,
+  and every return to ring 3 swaps back.
+- **System calls**: `syscall` → `syscall_entry` switches to the thread's
+  kernel stack (kept in `struct cpu` next to TSS.RSP0), builds the same
+  `struct trap_frame` an interrupt would, enables interrupts (the kernel is
+  preemptible inside syscalls) and calls the portable `syscall_handle()`.
+  The return path uses `iretq`, not `sysretq`: slightly slower, but it
+  works for any frame and avoids the `sysretq` non-canonical-RIP bug that
+  faults in ring 0 on Intel CPUs.
+- **User pointers**: never dereferenced before `paging_user_range_ok()`
+  confirms every page is present, user-accessible and (if needed)
+  writable; otherwise the call returns `-ERR_FAULT`. Safe without locks
+  while each process has one thread.
+- **Faults**: an exception from ring 3 prints the usual report (minus the
+  backtrace: user frame pointers are untrusted), kills only that process
+  and frees its memory; the kernel carries on. Tests: `user-pagefault`,
+  `user-privileged` (`cli` → #GP), `user-kernel-read`.
+- **Teardown**: a process's memory is freed when its thread is reaped, i.e.
+  after the scheduler has switched to another address space; if the next
+  thread is a kernel thread, the scheduler loads the kernel's root first so
+  the dying root is never the active one.
+- **FPU/SSE**: the kernel doesn't save FPU/SSE registers on a switch yet,
+  so user programs are compiled with `-mgeneral-regs-only` too. Saving them
+  (`fxsave`/`xsave`) is needed before running arbitrary compiled code.
+- Waiting for a process to exit polls once per tick for now; M5's
+  notifications replace that.
+
 ## IPC
 
 - **Endpoints**: synchronous rendezvous. Sender blocks until a receiver is
@@ -240,24 +298,21 @@ preemption of two threads that never yield, and leak-free thread exit.
 - **PCI**: a user-space PCI server owns ECAM, enumerates devices and hands
   out per-device config/BAR/MSI caps to drivers.
 
-## Syscall ABI (target)
+## Syscall ABI
 
-Entered with `syscall`; number in `rax`, args in `rdi, rsi, rdx, r10, r8, r9`.
+Entered with `syscall`; number in `rax`, args in `rdi, rsi, rdx, r10, r8, r9`,
+result in `rax` (negative = `-ERR_*`); `rcx` and `r11` are clobbered. The
+numbers live in `include/abi/syscall.h`.
 
-| # | Call | Purpose |
+| # | Call | Status |
 |---|---|---|
-| 0 | `send(ep, msg)` | blocking send |
-| 1 | `recv(ep) -> msg` | blocking receive |
-| 2 | `call(ep, msg) -> msg` | send + wait for reply |
-| 3 | `reply_recv(ep, msg) -> msg` | server loop |
-| 4 | `notify(ntfn, bits)` | signal |
-| 5 | `wait(ntfn) -> bits` | wait for signal |
-| 6 | `cap_copy(src, dst, rights)` | derive cap |
-| 7 | `cap_delete(slot)` / `cap_revoke(slot)` | |
-| 8 | `map(as, frame, vaddr, perms)` / `unmap` | |
-| 9 | `thread_create(...)`, `thread_start`, `yield` | |
-
-Debug-only `debug_putc` exists until the console server works.
+| 0 | `debug_write(buf, len) -> len` | M4 (debug only; goes away once the console server exists) |
+| 1 | `exit(code)` | M4 |
+| 2 | `yield()` | M4 |
+| 3+ | `send`, `recv`, `call`, `reply_recv` (endpoints) | M5 |
+| | `notify(ntfn, bits)`, `wait(ntfn) -> bits` | M5 |
+| | `cap_copy`, `cap_delete`, `cap_revoke` | M5 |
+| | `map(frame, vaddr, perms)`, `unmap`, `thread_create` | M5/M6 |
 
 ## Milestones
 
@@ -267,7 +322,7 @@ Debug-only `debug_putc` exists until the console server works.
 | **M1** | GDT/TSS, IDT, exception handlers | a deliberate #PF prints a register dump; a #DF on a broken stack is caught via IST ✅ |
 | **M2** | Frame allocator, page tables, kernel slab heap | kernel runs on its own PML4 (top-level page table) with W^X; second address space works ✅ |
 | **M3** | LAPIC timer, kernel threads, scheduler | two kernel threads that never yield share the CPU; stack overflow caught by guard page ✅ |
-| M4 | Ring 3, `syscall`/`sysret`, root task loaded | user program calls `debug_putc` |
+| **M4** | Ring 3, `syscall`, root task loaded from an ELF module | root task prints via a syscall; preempted in ring 3 and resumed; a faulting process is killed and the kernel survives ✅ |
 | M5 | Endpoints, notifications, capability tables | ping-pong between two user threads over IPC |
 | M6 | Root task spawns servers from a manifest | console server running in ring 3 |
 | M7 | User-space serial console driver (IRQ via notification) | kernel stops printing directly |

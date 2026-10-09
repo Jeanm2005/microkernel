@@ -203,28 +203,58 @@ uint64_t paging_new_root(void)
     return root;
 }
 
-static void free_tables(pte_t entry, int level)
+static void free_tables(pte_t entry, int level, bool free_frames)
 {
     /* `entry` points to a table at `level`; free everything below it. */
     pte_t *t = table(entry);
-    if (level > 1) {
-        for (int i = 0; i < 512; i++)
-            if ((t[i] & PTE_PRESENT) && !(t[i] & PTE_PS))
-                free_tables(t[i], level - 1);
+    for (int i = 0; i < 512; i++) {
+        if (!(t[i] & PTE_PRESENT))
+            continue;
+        if (level == 1 || (t[i] & PTE_PS)) {
+            /* A leaf: a mapped page. 2 MiB user pages aren't used yet. */
+            kassert(level == 1);
+            if (free_frames)
+                pmm_free(t[i] & PTE_ADDR);
+        } else {
+            free_tables(t[i], level - 1, free_frames);
+        }
     }
     pmm_free(entry & PTE_ADDR);
     table_frames--;
 }
 
-void paging_destroy_root(uint64_t root)
+void paging_destroy_root(uint64_t root, bool free_frames)
 {
     kassert(root != kernel_root && root != current_root());
     pte_t *t = phys_to_virt(root);
     for (int i = 0; i < KERNEL_HALF; i++)   /* user half only */
         if (t[i] & PTE_PRESENT)
-            free_tables(t[i], 3);
+            free_tables(t[i], 3, free_frames);
     pmm_free(root);
     table_frames--;
+}
+
+bool paging_user_range_ok(uint64_t root, uint64_t virt, uint64_t len, bool write)
+{
+    if (len == 0)
+        return true;
+    uint64_t end = virt + len;
+    if (end < virt || end > (1ull << 47))   /* overflow, or reaches the kernel half */
+        return false;
+
+    pte_t need = PTE_PRESENT | PTE_USER | (write ? PTE_WRITE : 0);
+    for (uint64_t page = ALIGN_DOWN(virt, PAGE_SIZE); page < end; page += PAGE_SIZE) {
+        pte_t *t = phys_to_virt(root);
+        for (int l = 4; l >= 1; l--) {
+            pte_t e = t[index_at(page, l)];
+            if ((e & need) != need)
+                return false;
+            if (l == 1 || (e & PTE_PS))
+                break;
+            t = table(e);
+        }
+    }
+    return true;
 }
 
 void paging_activate(uint64_t root)

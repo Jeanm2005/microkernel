@@ -23,6 +23,9 @@ REQ struct limine_executable_address_request kaddr_req = {
 REQ struct limine_executable_cmdline_request cmdline_req = {
     .id = LIMINE_EXECUTABLE_CMDLINE_REQUEST_ID, .revision = 0,
 };
+REQ struct limine_module_request module_req = {
+    .id = LIMINE_MODULE_REQUEST_ID, .revision = 0,
+};
 
 __attribute__((used, section(".limine_requests_start")))
 static volatile uint64_t requests_start[] = LIMINE_REQUESTS_START_MARKER;
@@ -68,6 +71,28 @@ void boot_info_collect(struct boot_info *out)
             n = BOOT_CMDLINE_MAX - 1;
         memcpy(out->cmdline, cl->cmdline, n);
         out->cmdline[n] = '\0';
+    }
+
+    /* Modules are optional too. Limine gives HHDM addresses; we keep
+     * physical ones, like everything else in boot_info. */
+    out->module_count = 0;
+    struct limine_module_response *mods = module_req.response;
+    for (uint64_t i = 0; mods && i < mods->module_count; i++) {
+        if (out->module_count == BOOT_MAX_MODULES)
+            panic("more than %d boot modules", BOOT_MAX_MODULES);
+        struct limine_file *f = mods->modules[i];
+        struct boot_module *m = &out->modules[out->module_count++];
+        const char *base = f->path;
+        for (const char *p = f->path; *p; p++)
+            if (*p == '/')
+                base = p + 1;
+        size_t n = strlen(base);
+        if (n >= sizeof m->name)
+            n = sizeof m->name - 1;
+        memcpy(m->name, base, n);
+        m->name[n] = '\0';
+        m->phys = (uint64_t)f->address - hh->offset;
+        m->size = f->size;
     }
 
     if (mm->entry_count > BOOT_MAX_REGIONS)

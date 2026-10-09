@@ -65,7 +65,7 @@ static void test_paging(void)
     kassert(!paging_translate(kroot, TEST_VADDR, NULL));
     kassert(*(uint64_t *)phys_to_virt(frame) == 0x5ca1ab1e);
     kassert(paging_unmap(root, TEST_VADDR) == frame);
-    paging_destroy_root(root);
+    paging_destroy_root(root, false);   /* frame is ours; freed below */
 
     pmm_free(frame);
     /* Page tables created for TEST_VADDR in the kernel root stay (they are

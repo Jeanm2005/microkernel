@@ -56,6 +56,17 @@ run_case boot "" 1 \
     "selftest: sleep ok" \
     "selftest: preemption ok" \
     "selftest: thread reaping ok" \
+    "module: root.elf" \
+    "[root] hello from user space (mode 0)" \
+    "[root] running in ring 3 (cs = 23)" \
+    "[root] ok: debug_write(kernel address) returns -ERR_FAULT" \
+    "[root] ok: debug_write(unmapped address) returns -ERR_FAULT" \
+    "[root] ok: debug_write(too long) returns -ERR_INVAL" \
+    "[root] ok: unknown syscall returns -ERR_NOSYS" \
+    "[root] ran 10^9 cycles without a system call" \
+    "[root] done, 0 failure(s)" \
+    "selftest: user mode ok" \
+    "selftest: user preemption ok" \
     "kernel: init complete"
 
 run_case pagefault "selftest=pagefault" 3 \
@@ -81,6 +92,26 @@ run_case slab-doublefree "selftest=slab-doublefree" 3 \
 run_case stack-overflow "selftest=stack-overflow" 3 \
     "*** DOUBLE FAULT (#DF)" \
     "KERNEL PANIC"
+
+# A faulting user process is killed, and the kernel carries on (status 1).
+run_case user-pagefault "selftest=user-pagefault" 1 \
+    "[root] writing through a null pointer" \
+    "cause: write to a non-present page at 0x0000000000000000 (user mode)" \
+    "process: killed 'root': PAGE FAULT (#PF)" \
+    "selftest: kernel survived a faulting user process" \
+    "kernel: init complete"
+
+run_case user-privileged "selftest=user-privileged" 1 \
+    "[root] executing cli (ring 0 only)" \
+    "*** GENERAL PROTECTION FAULT (#GP)" \
+    "process: killed 'root': GENERAL PROTECTION FAULT (#GP)" \
+    "kernel: init complete"
+
+run_case user-kernel-read "selftest=user-kernel-read" 1 \
+    "[root] reading kernel memory" \
+    "cause: read from a protected page at 0xffffffff80000000 (user mode)" \
+    "process: killed 'root': PAGE FAULT (#PF)" \
+    "kernel: init complete"
 
 run_case unknown-selftest "selftest=nonsense" 3 \
     "unknown selftest 'nonsense'"
