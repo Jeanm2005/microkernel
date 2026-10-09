@@ -1,9 +1,11 @@
-/* User processes. For now a process is one address space plus one thread;
- * capability tables join it in M5. */
+/* User processes: an address space, a capability table and (for now)
+ * one thread. */
 #pragma once
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
+#include <kernel/cap.h>
+#include <kernel/sched.h>
 
 /* User stack: 16 KiB just below the top of the user half, with one
  * unmapped page above it and nothing mapped below it, so running off
@@ -29,16 +31,25 @@ struct process {
     uint64_t       run_ticks;      /* timer ticks its thread ran for, set at exit */
     int            refs;           /* the thread + whoever holds the pointer */
     bool           at_line_start;  /* for prefixing debug output with the name */
+    struct waitq   exit_waiters;   /* kernel threads in process_wait() */
+    struct cspace  cspace;         /* its capabilities; all dropped when it dies */
 };
 
-/* Load an ELF image into a new address space and start it as a thread at
- * `priority`, with `arg` as main()'s argument. Returns NULL on failure
- * (reason printed). The caller gets a reference: release it with
- * process_put(). */
+/* Load an ELF image into a new address space with a thread at `priority`
+ * that will run main(arg), but don't start it yet, so the caller can hand
+ * it capabilities first. Returns NULL on failure (reason printed). The
+ * caller gets a reference: release it with process_put(). */
+struct process *process_create(const char *name, const void *elf, size_t size,
+                               uint64_t arg, uint8_t priority);
+void process_start(struct process *p);
+/* create + start. */
 struct process *process_spawn(const char *name, const void *elf, size_t size,
                               uint64_t arg, uint8_t priority);
 
-/* Sleep until the process has exited or been killed. */
+/* Give the process a capability to `obj`. Returns its slot or -ERR_FULL. */
+int64_t process_give_cap(struct process *p, struct kobj *obj, uint32_t rights, uint64_t badge);
+
+/* Block until the process has exited or been killed. */
 void process_wait(struct process *p);
 void process_put(struct process *p);
 

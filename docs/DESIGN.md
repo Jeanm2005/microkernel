@@ -64,17 +64,17 @@ kernel/
                   headers used only inside arch/ (gdt.h, idt.h, trap.h,
                   lapic.h) live here
   core/           portable kernel logic (main, panic, cmdline, pmm, slab,
-                  kstack, sched, process, elf, syscall, self-tests;
-                  later ipc/cap)
+                  kstack, sched, process, elf, syscall, object, cap, ipc,
+                  self-tests)
   lib/            freestanding libc pieces (string, kprintf)
   include/arch/   interface core/ uses to reach arch code
   include/kernel/ core interfaces
   linker.ld
 include/abi/      what the kernel and user programs share: syscall numbers,
-                  error codes (no kernel internals)
+                  rights, error codes, test protocol (no kernel internals)
 user/
-  lib/            user runtime: crt0 (_start), syscall wrappers, printf
-  root/           the root task
+  lib/            user runtime: crt0 (_start), syscall and IPC wrappers, printf
+  root/           the root task (also runs the IPC test server and client)
   linker.ld       user programs load at 0x400000
 scripts/test.sh   boot-and-check test runner (`make test`)
 docs/DESIGN.md
@@ -118,16 +118,23 @@ case with a different kernel command line (`CMDLINE`, passed through
 
 Destructive tests are selected with `selftest=<name>` (memory tests in
 `core/selftest.c`, scheduler tests in `core/selftest_sched.c`, user tests
-in `core/selftest_user.c`, CPU tests in `arch/x86_64/selftest.c`). The
-user tests are the exception: the kernel must survive them, so they end
-with status 1. Every boot also runs the non-destructive ones: an `int3`
-round trip, and PMM, paging (incl. switching to a second address space)
-and slab checks from `kmain`; then from the init thread the scheduler
-checks (priority order, sleep length, preemption of two threads that never
-yield, leak-free thread exit) and the root task, which checks its own
-privilege level and syscall error handling, then computes for 10^9 cycles
-without syscalls while a kernel thread competes for the CPU. Its exit code
-and a leak check on its memory are verified.
+in `core/selftest_user.c`, IPC tests in `core/selftest_ipc.c`, CPU tests
+in `arch/x86_64/selftest.c`). The user and IPC tests are the exception:
+the kernel must survive them, so they end with status 1.
+
+Every boot also runs the non-destructive tests:
+- from `kmain`: an `int3` round trip, and PMM, paging (including switching
+  to a second address space) and slab checks;
+- from the init thread: the scheduler checks (priority order, sleep
+  length, preemption of two threads that never yield, leak-free thread
+  exit);
+- the root task, which checks its own privilege level and syscall error
+  handling, then computes for 10^9 cycles without syscalls while a kernel
+  thread competes for the CPU; its exit code and a leak check on its
+  memory are verified;
+- the IPC test (see IPC below): a server and a client process, checking
+  both exit codes, the number of direct switches, and that every frame
+  came back.
 
 ## Memory (M2)
 
@@ -250,37 +257,73 @@ and a leak check on its memory are verified.
 - **FPU/SSE**: the kernel doesn't save FPU/SSE registers on a switch yet,
   so user programs are compiled with `-mgeneral-regs-only` too. Saving them
   (`fxsave`/`xsave`) is needed before running arbitrary compiled code.
-- Waiting for a process to exit polls once per tick for now; M5's
-  notifications replace that.
+- Waiting for a process to exit blocks on a wait queue (since M5).
 
-## IPC
+## IPC (M5)
 
-- **Endpoints**: synchronous rendezvous. Sender blocks until a receiver is
-  ready (and vice versa).
-- **Messages**: a small fixed payload passed in registers (target: 6 words)
-  plus optional capability transfer. Bulk data goes through shared-memory
-  regions set up with frame capabilities.
-- **Calls**: `send`, `recv`, `call` (send + wait for reply), `reply_recv`
-  (reply to last caller + wait for next; the server loop's single syscall),
-  `notify`/`wait` for notifications.
-- **Reply capability**: `call` gives the server a one-shot reply cap, so a
-  server can only answer the client that called it.
-- **Notifications**: a word of bits, OR-ed on signal. Used for IRQs and
-  async events. Never blocks the signaller.
+- **Endpoints** are synchronous rendezvous points: a sender waits until a
+  receiver takes its message and vice versa. Each endpoint has one queue
+  of waiting senders and one of waiting receivers; at most one is
+  non-empty.
+- **Messages** are 4 words in registers, the sender's badge, and at most
+  one capability. Message words are copied once, straight into the
+  receiver's syscall results; there are no kernel message buffers.
+- **Calls**: `send`, `recv`, `call` (send, then wait for the reply),
+  `reply`, and `reply_recv` (reply, then wait for the next message: a
+  server's whole main loop is one syscall).
+- **Replies** go to an implicit per-thread reply slot: receiving a `call`
+  records the caller as `reply_to`, so a server can only answer the client
+  that called it, exactly once. This is the "one-shot reply capability"
+  without a table slot.
+- **Fast path**: when a `call` finds a server already waiting, the kernel
+  blocks the caller and switches straight to the server
+  (`sched_block_and_switch`), skipping the run queue; `reply_recv`
+  switches straight back. The test counts these: ~2000 direct switches
+  for 1000 round trips. (Raw cycle counts under QEMU's emulator say
+  nothing about real hardware, so they're printed but not judged.)
+- **Death**: a server that dies or calls `recv` without replying makes its
+  pending caller's `call` return `-ERR_DEAD` instead of hanging forever
+  (`selftest=ipc-server-dies`). Clients queued on the endpoint stay queued:
+  whoever receives on it next (a restarted server, in M9) serves them.
+- **Notifications**: a word of bits. `notify` ORs in bits and the cap's
+  badge and never blocks; `wait` returns and clears the word, blocking if
+  it is zero. Meant for interrupts and events.
+- **Locking**: every IPC path runs with interrupts off, which on one CPU
+  makes each operation atomic.
+- Blocked threads hold a reference to the object they wait on, so an
+  endpoint or notification can never be freed while anyone is queued.
+- `process_wait` in the kernel now blocks on a wait queue instead of
+  polling once per tick.
 
-## Capabilities
+## Capabilities (M5)
 
-- Every process has a capability table (CSpace): a flat array of slots to
-  start; a two-level table if we need more than a few hundred slots.
-- A slot holds `{object pointer, type, rights}`. Rights: read, write, grant.
-- Object types: thread, address space, endpoint, notification, frame,
-  IRQ, I/O-port range, cap table.
-- Operations: copy (with equal or fewer rights), move, delete, revoke
-  (deletes all caps derived from this one via a derivation tree).
-- Simplification vs seL4: no "untyped memory" retyping at first. The kernel
-  allocates objects from its own pools, and per-process quotas stop abuse.
-- x86-specific: **I/O-port capabilities** are enforced through the TSS I/O
-  permission bitmap, switched on context switch for threads that hold one.
+- **Capability tables**: each process has a flat table of 64 slots
+  (`struct cspace`), embedded in `struct process`. A handle is a slot
+  number; slot 0 is never used. A slot holds `{object, rights, badge}`.
+- **Rights**: READ (recv/wait), WRITE (send/call/notify), GRANT
+  (capabilities may travel in messages over this endpoint cap; for a
+  reply, the caller's cap must have GRANT, so a client decides whether it
+  accepts capabilities back).
+- **Operations**: `cap_copy` derives a copy with a subset of the rights,
+  and can stamp a badge on an unbadged cap ("mint"), never re-badge one;
+  `cap_delete` drops one. Sending a cap in a message copies it into the
+  receiver's table; the sender keeps its own.
+- **Badges** let a server tell clients apart: every message sent through a
+  badged endpoint cap carries that badge, and the receiver sees it.
+- **Objects** (`struct kobj`) are reference-counted: each capability and
+  each thread blocked on the object holds one; the last `kobj_put` frees
+  it. Types so far: endpoint, notification, factory.
+- **Factories** replace seL4's untyped memory with something simpler:
+  creating a kernel object requires a factory capability, and each factory
+  has a budget. Freeing an object refunds its factory (which stays alive
+  until all its objects are gone). So there is no ambient authority to
+  consume kernel memory: a process can only create as many objects as the
+  factory it was given allows. The tests give a factory to the server only.
+- **Not yet**: revocation (deleting every capability derived from one).
+  It needs a derivation tree per object; it comes with supervision in M9,
+  where the supervisor must be able to take capabilities back.
+- x86-specific (later): I/O-port capabilities enforced through the TSS
+  I/O permission bitmap.
 
 ## Drivers and modules
 
@@ -301,18 +344,26 @@ and a leak check on its memory are verified.
 ## Syscall ABI
 
 Entered with `syscall`; number in `rax`, args in `rdi, rsi, rdx, r10, r8, r9`,
-result in `rax` (negative = `-ERR_*`); `rcx` and `r11` are clobbered. The
-numbers live in `include/abi/syscall.h`.
+result in `rax` (negative = `-ERR_*`); `rcx` and `r11` are clobbered. IPC
+calls also return the message in the argument registers. Numbers, rights,
+object types and error codes live in `include/abi/syscall.h`.
 
-| # | Call | Status |
+| # | Call | Notes |
 |---|---|---|
-| 0 | `debug_write(buf, len) -> len` | M4 (debug only; goes away once the console server exists) |
-| 1 | `exit(code)` | M4 |
-| 2 | `yield()` | M4 |
-| 3+ | `send`, `recv`, `call`, `reply_recv` (endpoints) | M5 |
-| | `notify(ntfn, bits)`, `wait(ntfn) -> bits` | M5 |
-| | `cap_copy`, `cap_delete`, `cap_revoke` | M5 |
-| | `map(frame, vaddr, perms)`, `unmap`, `thread_create` | M5/M6 |
+| 0 | `debug_write(buf, len) -> len` | debug only; goes away once the console server exists |
+| 1 | `exit(code)` | |
+| 2 | `yield()` | |
+| 3 | `send(ep, w0..w3, cap)` | needs WRITE (GRANT to send a cap) |
+| 4 | `recv(ep) -> msg` | needs READ |
+| 5 | `call(ep, w0..w3, cap) -> reply` | needs WRITE |
+| 6 | `reply(w0..w3, cap)` | to the last caller received |
+| 7 | `reply_recv(ep, w0..w3, cap) -> msg` | the server loop |
+| 8 | `notify(ntfn, bits)` | needs WRITE |
+| 9 | `wait(ntfn) -> bits` | needs READ |
+| 10 | `cap_copy(slot, rights, badge) -> slot` | rights must be a subset |
+| 11 | `cap_delete(slot)` | |
+| 12 | `obj_create(factory, type) -> slot` | endpoint or notification; uses budget |
+| later | `map`, `unmap`, `thread_create`, `process_create`, `cap_revoke` | M6/M9 |
 
 ## Milestones
 
@@ -323,7 +374,7 @@ numbers live in `include/abi/syscall.h`.
 | **M2** | Frame allocator, page tables, kernel slab heap | kernel runs on its own PML4 (top-level page table) with W^X; second address space works ✅ |
 | **M3** | LAPIC timer, kernel threads, scheduler | two kernel threads that never yield share the CPU; stack overflow caught by guard page ✅ |
 | **M4** | Ring 3, `syscall`, root task loaded from an ELF module | root task prints via a syscall; preempted in ring 3 and resumed; a faulting process is killed and the kernel survives ✅ |
-| M5 | Endpoints, notifications, capability tables | ping-pong between two user threads over IPC |
+| **M5** | Endpoints, notifications, capability tables | two processes talk only through capabilities they were given: 1000 call/reply round trips on the fast path, a capability passed in a reply, a cross-process notification; a dying server returns -ERR_DEAD to its caller ✅ |
 | M6 | Root task spawns servers from a manifest | console server running in ring 3 |
 | M7 | User-space serial console driver (IRQ via notification) | kernel stops printing directly |
 | M8 | PCI server + virtio-blk/AHCI driver + tiny FS server | `cat` a file from disk |

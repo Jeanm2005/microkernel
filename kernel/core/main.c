@@ -9,6 +9,7 @@
 #include <kernel/boot.h>
 #include <kernel/cmdline.h>
 #include <kernel/kprintf.h>
+#include <kernel/object.h>
 #include <kernel/panic.h>
 #include <kernel/pmm.h>
 #include <kernel/sched.h>
@@ -67,12 +68,14 @@ static void kinit(void *arg)
 
     sched_selftest_boot();
     user_selftest_boot(&boot);
+    ipc_selftest_boot(&boot);
 
     char test[32];
     if (cmdline_get(boot.cmdline, "selftest", test, sizeof test)) {
         kprintf("selftest: running '%s'\n", test);
         if (!core_selftest_run(test) && !sched_selftest_run(test) &&
-            !user_selftest_run(test, &boot) && !arch_selftest_run(test))
+            !user_selftest_run(test, &boot) && !ipc_selftest_run(test, &boot) &&
+            !arch_selftest_run(test))
             panic("unknown selftest '%s'", test);
     }
 
@@ -105,6 +108,7 @@ void kmain(void)
     pmm_init(&boot);
     paging_init(&boot);
     sched_init();
+    object_init();
 
     arch_selftest_boot();
     core_selftest_boot();

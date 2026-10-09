@@ -95,16 +95,13 @@ static void finish_switch(void)
     c->prev = NULL;
 }
 
-/* Pick the next thread and switch to it. The caller has already put the
- * current thread where it belongs (run queue, sleep list, or dead), and
- * interrupts are off. */
-static void schedule(void)
+/* Switch to `next`, which is not in any queue. The caller has already put
+ * the current thread where it belongs (run queue, sleep list, wait queue,
+ * or dead), and interrupts are off. */
+static void switch_to(struct thread *next)
 {
     struct cpu *c = this_cpu();
     struct thread *prev = c->current;
-    struct thread *next = dequeue_highest();
-    if (!next)
-        next = c->idle;
 
     c->need_resched = false;
     if (next == prev) {
@@ -133,8 +130,15 @@ static void schedule(void)
     }
     arch_context_switch(&prev->saved_rsp, next->saved_rsp);
 
-    /* We're back: some later schedule() switched to `prev` again. */
+    /* We're back: some later switch_to() switched to `prev` again. */
     finish_switch();
+}
+
+/* Pick the best ready thread (or idle) and switch to it. */
+static void schedule(void)
+{
+    struct thread *next = dequeue_highest();
+    switch_to(next ? next : this_cpu()->idle);
 }
 
 void thread_entry(void (*fn)(void *), void *arg)
@@ -193,14 +197,18 @@ struct thread *thread_create(const char *name, void (*fn)(void *), void *arg,
     return t ? start_thread(t) : NULL;
 }
 
-struct thread *thread_create_user(const char *name, void (*fn)(void *), void *arg,
-                                  uint8_t priority, struct process *proc)
+struct thread *thread_new_user(const char *name, void (*fn)(void *), void *arg,
+                               uint8_t priority, struct process *proc)
 {
     struct thread *t = thread_alloc(name, fn, arg, priority);
-    if (!t)
-        return NULL;
-    t->proc = proc;
-    return start_thread(t);
+    if (t)
+        t->proc = proc;
+    return t;
+}
+
+void thread_start(struct thread *t)
+{
+    start_thread(t);
 }
 
 void thread_exit(void)
@@ -243,6 +251,70 @@ struct thread *thread_current(void)
 uint64_t sched_ticks(void)
 {
     return this_cpu()->ticks;
+}
+
+/* ---- blocking ---------------------------------------------------------- */
+
+void waitq_push(struct waitq *q, struct thread *t)
+{
+    t->next = NULL;
+    if (q->tail)
+        q->tail->next = t;
+    else
+        q->head = t;
+    q->tail = t;
+}
+
+struct thread *waitq_pop(struct waitq *q)
+{
+    struct thread *t = q->head;
+    if (t) {
+        q->head = t->next;
+        if (!q->head)
+            q->tail = NULL;
+        t->next = NULL;
+    }
+    return t;
+}
+
+bool waitq_empty(const struct waitq *q)
+{
+    return q->head == NULL;
+}
+
+void sched_block(void)
+{
+    struct cpu *c = this_cpu();
+    kassert(c->current != c->idle);
+    c->current->state = THREAD_BLOCKED;
+    schedule();
+}
+
+void sched_wake(struct thread *t)
+{
+    kassert(t->state == THREAD_BLOCKED);
+    enqueue(t);
+    if (t->priority > this_cpu()->current->priority)
+        this_cpu()->need_resched = true;
+}
+
+void sched_block_and_switch(struct thread *next)
+{
+    struct cpu *c = this_cpu();
+    kassert(next->state == THREAD_BLOCKED && c->current != c->idle);
+    c->current->state = THREAD_BLOCKED;
+    if (highest_ready_priority() > next->priority) {
+        enqueue(next);          /* someone more urgent goes first */
+        schedule();
+    } else {
+        c->direct_switches++;
+        switch_to(next);
+    }
+}
+
+uint64_t sched_direct_switches(void)
+{
+    return this_cpu()->direct_switches;
 }
 
 /* ---- interrupt hooks ---------------------------------------------------- */

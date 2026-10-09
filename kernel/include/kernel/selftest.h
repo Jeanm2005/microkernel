@@ -20,3 +20,10 @@ bool sched_selftest_run(const char *name);
  * Unlike the others, those named tests return normally. */
 void user_selftest_boot(const struct boot_info *boot);
 bool user_selftest_run(const char *name, const struct boot_info *boot);
+
+/* IPC tests: a server and a client process built from the root task
+ * image, connected by an endpoint the kernel sets up. The named test
+ * ipc-server-dies crashes the server mid-conversation and checks the
+ * client gets -ERR_DEAD instead of hanging; it returns normally. */
+void ipc_selftest_boot(const struct boot_info *boot);
+bool ipc_selftest_run(const char *name, const struct boot_info *boot);

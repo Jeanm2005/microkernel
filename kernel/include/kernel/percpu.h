@@ -23,4 +23,5 @@ struct cpu {
     uint64_t       ticks;         /* timer ticks since the scheduler started */
     uint64_t       switches;      /* context switches */
     uint64_t       preemptions;   /* switches forced by the timer or a wakeup */
+    uint64_t       direct_switches; /* IPC handoffs that skipped the run queue */
 };

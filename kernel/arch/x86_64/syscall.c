@@ -5,10 +5,10 @@
 #include "gdt.h"
 #include "trap.h"
 
-#define MSR_STAR 0xc0000081 /* segment selectors for syscall/sysret */
-#define MSR_LSTAR 0xc0000082 /* syscall entry point */
-#define MSR_SFMASK 0xc0000084 /* RFLAGS bits cleared on syscall */
-#define EFER_SCE (1ull << 0) /* syscall enable */
+#define MSR_STAR    0xc0000081   /* segment selectors for syscall/sysret */
+#define MSR_LSTAR   0xc0000082   /* syscall entry point */
+#define MSR_SFMASK  0xc0000084   /* RFLAGS bits cleared on syscall */
+#define EFER_SCE    (1ull << 0)  /* syscall enable */
 
 #define RFLAGS_TF   (1ull << 8)
 #define RFLAGS_IF   (1ull << 9)
@@ -32,11 +32,21 @@ void arch_syscall_init(void)
     wrmsr(MSR_SFMASK, RFLAGS_IF | RFLAGS_DF | RFLAGS_TF | RFLAGS_AC);
 }
 
-/* Called from syscall_entry with interrupts on. */
+/* Called from syscall_entry with interrupts on. Arguments come in, and
+ * IPC results go back out, through rdi, rsi, rdx, r10, r8, r9. */
 void syscall_dispatch(struct trap_frame *tf)
 {
-    tf->rax = syscall_handle(tf->rax, tf->rdi, tf->rsi, tf->rdx,
-                             tf->r10, tf->r8, tf->r9);
+    struct syscall_regs r = {
+        .nr = tf->rax,
+        .arg = { tf->rdi, tf->rsi, tf->rdx, tf->r10, tf->r8, tf->r9 },
+    };
+    tf->rax = syscall_handle(&r);
+    tf->rdi = r.arg[0];
+    tf->rsi = r.arg[1];
+    tf->rdx = r.arg[2];
+    tf->r10 = r.arg[3];
+    tf->r8  = r.arg[4];
+    tf->r9  = r.arg[5];
     cpu_cli();
     sched_preempt_if_needed();
 }

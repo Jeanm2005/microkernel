@@ -2,26 +2,27 @@
  * works; from M6 it becomes the supervisor that starts every server. */
 #include <stdint.h>
 #include <abi/selftest.h>
+#include "root.h"
 #include "syscall.h"
 #include "ulib.h"
 
-static int failures;
+int failures;
 
-static void check(int ok, const char *what)
+void check(int ok, const char *what)
 {
     printf("%s: %s\n", ok ? "ok" : "FAILED", what);
     if (!ok)
         failures++;
 }
 
-static uint64_t rdtsc(void)
+uint64_t rdtsc(void)
 {
     uint32_t lo, hi;
-    __asm__ volatile("rdtsc" : "=a"(lo), "=d"(hi));
+    __asm__ volatile("rdtsc" : "=a"(lo), "=d"(hi));   /* allowed in ring 3 */
     return ((uint64_t)hi << 32) | lo;
 }
 
- /* Compute for a while without any system call. The only way anything else
+/* Compute for a while without any system call. The only way anything else
  * runs meanwhile is the timer interrupting us in ring 3, the kernel
  * switching threads, and later resuming us exactly where we were. */
 static void busy_wait(void)
@@ -32,28 +33,33 @@ static void busy_wait(void)
     printf("ran 10^9 cycles without a system call\n");
 }
 
- /* Deliberate crimes, one per test mode. Each must get this process killed
+/* Deliberate crimes, one per test mode. Each must get this process killed
  * without disturbing the kernel. */
 static void misbehave(long mode)
 {
     switch (mode) {
-        case ROOT_MODE_PAGEFAULT:
-            printf("writing through a null pointer\n");
-            *(volatile int *)0 = 1;
-            break;
-        case ROOT_MODE_PRIVILEGED:
-            printf("executing cli (ring 0 only)\n");
-            __asm__ volatile("cli");
-            break;
-        case ROOT_MODE_KERNEL_READ:
-            printf("reading kernel memory\n");
-            (void)*(volatile uint64_t *)0xffffffff80000000ull;
-            break;
+    case ROOT_MODE_PAGEFAULT:
+        printf("writing through a null pointer\n");
+        *(volatile int *)0 = 1;
+        break;
+    case ROOT_MODE_PRIVILEGED:
+        printf("executing cli (ring 0 only)\n");
+        __asm__ volatile("cli");
+        break;
+    case ROOT_MODE_KERNEL_READ:
+        printf("reading kernel memory\n");
+        (void)*(volatile uint64_t *)0xffffffff80000000ull;
+        break;
     }
 }
 
 int main(long mode)
 {
+    if (mode == ROOT_MODE_IPC_SERVER || mode == ROOT_MODE_IPC_SERVER_CRASH)
+        return ipc_server(mode);
+    if (mode == ROOT_MODE_IPC_CLIENT || mode == ROOT_MODE_IPC_CLIENT_ORPHAN)
+        return ipc_client(mode);
+
     printf("hello from user space (mode %ld)\n", mode);
 
     uint16_t cs;

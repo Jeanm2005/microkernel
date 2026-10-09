@@ -67,6 +67,22 @@ run_case boot "" 1 \
     "[root] done, 0 failure(s)" \
     "selftest: user mode ok" \
     "selftest: user preemption ok" \
+    "[ping] ok: recv on a send-only capability fails with -ERR_PERM" \
+    "[ping] ok: call on an empty slot fails with -ERR_BADCAP" \
+    "[ping] ok: notify on an endpoint capability fails with -ERR_TYPE" \
+    "[ping] ok: a copy can't gain rights the original lacks" \
+    "[ping] ok: a badged capability can't be re-badged" \
+    "[ping] ok: creating kernel objects needs a factory capability" \
+    "[ping] ok: a deleted capability is gone" \
+    "[ping] ok: 1000 call/reply round trips" \
+    "[pong] created a notification, sending a signal-only copy" \
+    "[ping] ok: received a notification capability in a reply" \
+    "[ping] ok: the received copy can signal but not wait" \
+    "[pong] woke up from wait with bits 0x5" \
+    "[ping] ok: server woke up and saw bits 0x5" \
+    "[pong] quitting" \
+    "[ping] done, 0 failure(s)" \
+    "selftest: ipc ok" \
     "kernel: init complete"
 
 run_case pagefault "selftest=pagefault" 3 \
@@ -111,6 +127,14 @@ run_case user-kernel-read "selftest=user-kernel-read" 1 \
     "[root] reading kernel memory" \
     "cause: read from a protected page at 0xffffffff80000000 (user mode)" \
     "process: killed 'root': PAGE FAULT (#PF)" \
+    "kernel: init complete"
+
+# A server dies with a call pending: the caller gets an error, not a hang.
+run_case ipc-server-dies "selftest=ipc-server-dies" 1 \
+    "[pong] crashing while handling ping 500" \
+    "process: killed 'pong': PAGE FAULT (#PF)" \
+    "[ping] ok: call returns -ERR_DEAD when the server dies mid-call" \
+    "selftest: client got -ERR_DEAD when its server died; kernel survived" \
     "kernel: init complete"
 
 run_case unknown-selftest "selftest=nonsense" 3 \
