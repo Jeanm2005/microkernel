@@ -6,7 +6,13 @@
 # process exit status (code << 1) | 1:
 #   1   = kernel finished normally (qemu_exit(0))
 #   3   = kernel panicked          (qemu_exit(1))
-#   124 = timed out (kernel hung or triple-faulted and rebooted)
+#   0   = triple fault (with -no-reboot QEMU shuts down instead of resetting)
+#   124 = timed out (kernel hung)
+#
+# Recent QEMU versions deliver isa-debug-exit as a shutdown request, which
+# -no-shutdown in QEMUFLAGS would turn into a pause, so each case overrides
+# it with -action shutdown=poweroff. stdin is /dev/null so QEMU, running in
+# the background under `timeout`, never touches the terminal.
 
 set -u
 : "${QEMU:?}" "${QEMUFLAGS:?}" "${BUILD:?}"
@@ -22,8 +28,8 @@ run_case() {
 
     make -s iso ISO="$iso" CMDLINE="$cmdline" >/dev/null || { echo "FAIL $name (ISO build)"; failed=1; return; }
     # shellcheck disable=SC2086  # QEMUFLAGS is meant to be split into words
-    timeout 20 $QEMU $QEMUFLAGS -cdrom "$iso" \
-        -device isa-debug-exit,iobase=0xf4,iosize=0x04 >"$log" 2>&1
+    timeout 20 $QEMU $QEMUFLAGS -action shutdown=poweroff -cdrom "$iso" \
+        -device isa-debug-exit,iobase=0xf4,iosize=0x04 </dev/null >"$log" 2>&1
     status=$?
 
     ok=1
