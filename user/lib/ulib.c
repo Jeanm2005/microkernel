@@ -48,7 +48,7 @@ static void put_uint(struct out *o, uint64_t v, unsigned base)
     char tmp[24];
     int i = 0;
     do {
-        tmp[i++] = "0123456789abcdef"[v % base]
+        tmp[i++] = "0123456789abcdef"[v % base];
         v /= base;
     } while (v);
     while (i)
