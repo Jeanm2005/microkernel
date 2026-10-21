@@ -110,3 +110,48 @@ static inline long sys_obj_create(long factory, long type)
     long a[6] = { factory, type, 0, 0, 0, 0 };
     return syscall6(SYS_OBJ_CREATE, a);
 }
+
+/* Boot modules and processes (root task). */
+
+static inline long sys_module_info(long mod, char *name, long len)
+{
+    long a[6] = { mod, (long)name, len, 0, 0, 0 };
+    return syscall6(SYS_MODULE_INFO, a);
+}
+
+static inline long sys_module_read(long mod, long offset, void *buf, long len)
+{
+    long a[6] = { mod, offset, (long)buf, len, 0, 0 };
+    return syscall6(SYS_MODULE_READ, a);
+}
+
+static inline long sys_proc_create(long factory, long mod, long priority, const char *name,
+                                   long name_len)
+{
+    long a[6] = { factory, mod, priority, (long)name, name_len, 0 };
+    return syscall6(SYS_PROC_CREATE, a);
+}
+
+/* Copy our capability in `slot` into process `proc`'s table at dst_slot,
+ * with the given rights (a subset) and badge (0 = keep). */
+static inline long sys_proc_give(long proc, long slot, long dst_slot, long rights, long badge)
+{
+    long a[6] = { proc, slot, dst_slot, rights, badge, 0 };
+    return syscall6(SYS_PROC_GIVE, a);
+}
+
+static inline long sys_proc_start(long proc, long arg)
+{
+    long a[6] = { proc, arg, 0, 0, 0, 0 };
+    return syscall6(SYS_PROC_START, a);
+}
+
+/* 0 and *code = exit code, or -ERR_DEAD if the process was killed. */
+static inline long sys_proc_wait(long proc, long *code)
+{
+    long a[6] = { proc, 0, 0, 0, 0, 0 };
+    long r = syscall6(SYS_PROC_WAIT, a);
+    if (r == 0)
+        *code = a[0];
+    return r;
+}

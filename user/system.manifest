@@ -1,0 +1,13 @@
+# The system the root task starts at boot. One program per line:
+#
+#   name      process name (also the prefix of its debug output)
+#   image     boot module holding its ELF executable
+#   priority  1..250; no higher than the root task's
+#   provides  service it serves on the endpoint in its slot 1, or -
+#   uses      services it may call, comma-separated, or -; they land in
+#             slots 2, 3, ... in this order, each with its own badge
+#   arg       number passed to main()
+#
+# name      image         priority  provides  uses      arg
+console     console.elf   200       console   -         0
+hello       hello.elf     100       -         console   0

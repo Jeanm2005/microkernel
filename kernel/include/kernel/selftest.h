@@ -27,3 +27,10 @@ bool user_selftest_run(const char *name, const struct boot_info *boot);
  * client gets -ERR_DEAD instead of hanging; it returns normally. */
 void ipc_selftest_boot(const struct boot_info *boot);
 bool ipc_selftest_run(const char *name, const struct boot_info *boot);
+
+/* The system test: the root task starts the servers and applications in a
+ * manifest (system.manifest), they run, and everything is torn down. The
+ * named test app-crash uses crash.manifest, where one application
+ * crashes; the rest must carry on. It returns normally. */
+void system_selftest_boot(const struct boot_info *boot);
+bool system_selftest_run(const char *name, const struct boot_info *boot);

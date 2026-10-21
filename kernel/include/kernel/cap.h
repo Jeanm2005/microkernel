@@ -21,6 +21,10 @@ struct cspace {
 /* Put a new capability in the lowest free slot; takes its own reference
  * to `obj`. Returns the slot, or -ERR_FULL. */
 int64_t cspace_insert(struct cspace *cs, struct kobj *obj, uint32_t rights, uint64_t badge);
+/* Same, but into `slot` exactly. Returns the slot, -ERR_INVAL if out of
+ * range, or -ERR_EXIST if it's in use. */
+int64_t cspace_insert_at(struct cspace *cs, int64_t slot, struct kobj *obj,
+                         uint32_t rights, uint64_t badge);
 
 /* Find the capability in `slot`, check it's for an object of `type` (0 =
  * any) and has all of `rights`. Returns 0 and sets *out, or -ERR_BADCAP,
@@ -32,6 +36,10 @@ int64_t cspace_lookup(struct cspace *cs, int64_t slot, uint32_t type, uint32_t r
  * unbadged endpoint cap can be given a badge ("minted"); a badged one
  * can't be re-badged. Returns the new slot or an error. */
 int64_t cspace_copy(struct cspace *cs, int64_t slot, uint32_t rights, uint64_t badge);
+/* The same rules, from one table into another: into `dst_slot`, or the
+ * lowest free slot if it is 0. */
+int64_t cspace_derive(struct cspace *src, int64_t slot, struct cspace *dst, int64_t dst_slot,
+                      uint32_t rights, uint64_t badge);
 
 int64_t cspace_delete(struct cspace *cs, int64_t slot);
 

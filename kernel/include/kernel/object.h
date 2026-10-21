@@ -9,6 +9,8 @@ enum kobj_type {
     KOBJ_ENDPOINT = 1,       /* same values as OBJ_* in abi/syscall.h */
     KOBJ_NOTIFICATION = 2,
     KOBJ_FACTORY = 3,
+    KOBJ_MODULE = 4,
+    KOBJ_PROCESS = 5,
 };
 
 struct factory;
@@ -42,12 +44,29 @@ struct factory {
     uint32_t    budget;
 };
 
+/* A boot module: a read-only file the bootloader loaded (a program image
+ * or a manifest). Only the kernel makes these, once, at boot. */
+struct module {
+    struct kobj obj;
+    const void *data;     /* in the HHDM; never freed (it's boot memory) */
+    uint64_t    size;
+    char        name[32];
+};
+
+/* A handle to a process. Holds a reference to the process; dropping the
+ * last handle of a process that was never started destroys it. */
+struct process_obj {
+    struct kobj     obj;
+    struct process *proc;
+};
+
 void object_init(void);
 
 /* Create an object with one reference (the caller's). `from` pays for it;
  * NULL means the kernel itself. Returns NULL if out of memory or budget. */
 struct kobj *kobj_create(enum kobj_type type, struct factory *from);
 struct kobj *factory_create(uint32_t budget);
+struct kobj *module_create(const char *name, const void *data, uint64_t size);
 
 void kobj_get(struct kobj *o);
 void kobj_put(struct kobj *o);

@@ -13,7 +13,14 @@ enum root_mode {
     ROOT_MODE_IPC_CLIENT        = 5,
     ROOT_MODE_IPC_SERVER_CRASH  = 6,  /* server that crashes mid-conversation */
     ROOT_MODE_IPC_CLIENT_ORPHAN = 7,  /* client that expects -ERR_DEAD */
+
+    /* The real job: start the system described by a manifest. */
+    ROOT_MODE_INIT        = 8,  /* system.manifest */
+    ROOT_MODE_INIT_CRASH  = 9,  /* crash.manifest: one application crashes */
 };
+
+/* Argument the hello program gets in crash.manifest: crash after printing. */
+#define HELLO_CRASH 1
 
 /* Capability slots the IPC tests set up before starting the programs. */
 #define TEST_SLOT_EP       1   /* server: READ|GRANT; client: WRITE|GRANT, badged */

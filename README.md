@@ -7,7 +7,7 @@ can crash and be restarted without taking the system down.
 
 See [docs/DESIGN.md](docs/DESIGN.md) for the architecture and milestones.
 
-**Status:** M5 of 10 done.
+**Status:** M6 of 10 done.
 
 - M0: boots via Limine on QEMU, serial console, memory map
 - M1: own GDT (Global Descriptor Table), TSS (Task State Segment) and IDT
@@ -23,6 +23,8 @@ See [docs/DESIGN.md](docs/DESIGN.md) for the architecture and milestones.
 - M5: capability tables, synchronous IPC endpoints with a direct-switch
   fast path, notifications, capability transfer, and object creation
   limited by factory capabilities
+- M6: the root task reads a manifest and starts a console server and its
+  clients, handing each exactly the capabilities its manifest line lists
 
 ## Build and run
 
@@ -30,7 +32,7 @@ Requirements: `gcc`, `binutils`, `make`, `git`, `xorriso`, `qemu-system-x86_64`
 (on Ubuntu/WSL2: `sudo apt install build-essential xorriso qemu-system-x86`).
 
 ```sh
-make run     # build ISO and boot in QEMU, serial output in the terminal
+make run     # build ISO and boot in QEMU, serial output in the terminal (Ctrl+C to quit)
 make test    # boot once per test case in scripts/test.sh and check the output
 make debug   # QEMU waits for GDB: gdb build/kernel.elf -ex 'target remote :1234'
 
@@ -40,6 +42,7 @@ make run CMDLINE="selftest=write-text"    # writing to kernel code faults (W^X)
 make run CMDLINE="selftest=stack-overflow" # a thread overflows into its guard page
 make run CMDLINE="selftest=user-pagefault" # a user process crashes; the kernel survives
 make run CMDLINE="selftest=ipc-server-dies" # a server dies mid-call; its client gets -ERR_DEAD
+make run CMDLINE="selftest=app-crash"       # one application crashes; the system carries on
 ```
 
 The first build clones the Limine bootloader into `limine/`.

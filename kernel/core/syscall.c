@@ -6,6 +6,7 @@
 #include <kernel/object.h>
 #include <kernel/process.h>
 #include <kernel/sched.h>
+#include <kernel/spawn.h>
 #include <kernel/syscall.h>
 
 static int64_t obj_create(struct cspace *cs, int64_t factory_slot, uint64_t type)
@@ -45,6 +46,15 @@ uint64_t syscall_handle(struct syscall_regs *r)
     case SYS_CAP_COPY:    return (uint64_t)cspace_copy(cs, (int64_t)a[0], (uint32_t)a[1], a[2]);
     case SYS_CAP_DELETE:  return (uint64_t)cspace_delete(cs, (int64_t)a[0]);
     case SYS_OBJ_CREATE:  return (uint64_t)obj_create(cs, (int64_t)a[0], a[1]);
+
+    case SYS_MODULE_INFO: return (uint64_t)sys_module_info(cs, (int64_t)a[0], a[1], a[2]);
+    case SYS_MODULE_READ: return (uint64_t)sys_module_read(cs, (int64_t)a[0], a[1], a[2], a[3]);
+    case SYS_PROC_CREATE: return (uint64_t)sys_proc_create(cs, (int64_t)a[0], (int64_t)a[1],
+                                                           a[2], a[3], a[4]);
+    case SYS_PROC_GIVE:   return (uint64_t)sys_proc_give(cs, (int64_t)a[0], (int64_t)a[1],
+                                                         (int64_t)a[2], a[3], a[4]);
+    case SYS_PROC_START:  return (uint64_t)sys_proc_start(cs, (int64_t)a[0], a[1]);
+    case SYS_PROC_WAIT:   return (uint64_t)sys_proc_wait(cs, (int64_t)a[0], &a[0]);
 
     default:              return (uint64_t)-ERR_NOSYS;
     }

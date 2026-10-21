@@ -6,8 +6,10 @@
 #   make test     boot once per test case in scripts/test.sh, check output
 #   make clean
 #
-# Two programs are built: the kernel (kernel/) and the root task (user/),
-# which the bootloader loads as a module. include/abi/ holds what they share.
+# Built: the kernel (kernel/) and the user programs (user/<name>/, one ELF
+# each). The bootloader loads the programs and the manifests (user/*.manifest)
+# as modules; the root task starts the rest. include/abi/ holds what the
+# kernel and the programs share.
 #
 # Pass a kernel command line with CMDLINE, e.g.
 #   make run CMDLINE="selftest=pagefault"
@@ -46,14 +48,28 @@ USER_CFLAGS := -std=gnu11 -O2 -g -Wall -Wextra -Werror -ffreestanding \
 USER_LDFLAGS := -m elf_x86_64 -nostdlib -static -z max-page-size=0x1000 -T user/linker.ld
 ULIB_SRCS := $(wildcard user/lib/*.c user/lib/*.S)
 ULIB_OBJS := $(patsubst %,$(BUILD)/%.o,$(basename $(ULIB_SRCS)))
-ROOT_OBJS := $(patsubst %,$(BUILD)/%.o,$(basename $(wildcard user/root/*.c)))
+
+# Programs: user/<name>/*.c, linked with user/lib into build/user/<name>.elf.
+USER_PROGS := root console hello
+USER_ELFS  := $(USER_PROGS:%=$(BUILD)/user/%.elf)
+MANIFESTS  := $(wildcard user/*.manifest)
+
+define user_prog
+$(1)_OBJS := $$(patsubst %,$$(BUILD)/%.o,$$(basename $$(wildcard user/$(1)/*.c)))
+$$(BUILD)/user/$(1).elf: $$(ULIB_OBJS) $$($(1)_OBJS) user/linker.ld
+	$$(LD) $$(USER_LDFLAGS) $$(ULIB_OBJS) $$($(1)_OBJS) -o $$@
+endef
+$(foreach p,$(USER_PROGS),$(eval $(call user_prog,$(p))))
+USER_OBJS := $(foreach p,$(USER_PROGS),$($(p)_OBJS))
 
 QEMUFLAGS := -M q35 -m 256M -cpu qemu64 -smp 1 -no-reboot -no-shutdown \
              -serial stdio -display none
 
 .PHONY: all iso run debug test clean FORCE
+# The user_prog rules above come first, so name the default goal explicitly.
+.DEFAULT_GOAL := all
 
-all: $(BUILD)/kernel.elf $(BUILD)/user/root.elf
+all: $(BUILD)/kernel.elf $(USER_ELFS)
 
 $(BUILD)/kernel.elf: $(OBJS) kernel/linker.ld
 	$(LD) $(LDFLAGS) $(OBJS) -o $@
@@ -76,9 +92,6 @@ $(BUILD)/user/%.o: user/%.S
 	@mkdir -p $(dir $@)
 	$(CC) -m64 -g -MMD -MP -c $< -o $@
 
-$(BUILD)/user/root.elf: $(ULIB_OBJS) $(ROOT_OBJS) user/linker.ld
-	$(LD) $(USER_LDFLAGS) $(ULIB_OBJS) $(ROOT_OBJS) -o $@
-
 # Limine binaries are fetched, not vendored.
 LIMINE_BRANCH := v9.x-binary
 limine/limine:
@@ -90,10 +103,10 @@ iso: $(ISO)
 
 # Always rebuilt (FORCE) because CMDLINE may differ from the last build;
 # it only takes a moment.
-$(ISO): $(BUILD)/kernel.elf $(BUILD)/user/root.elf limine.conf limine/limine FORCE
+$(ISO): $(BUILD)/kernel.elf $(USER_ELFS) $(MANIFESTS) limine.conf limine/limine FORCE
 	rm -rf $@.root
 	mkdir -p $@.root/boot/limine $@.root/EFI/BOOT
-	cp $(BUILD)/kernel.elf $(BUILD)/user/root.elf $@.root/boot/
+	cp $(BUILD)/kernel.elf $(USER_ELFS) $(MANIFESTS) $@.root/boot/
 	sed 's|@CMDLINE@|$(CMDLINE)|' limine.conf > $@.root/boot/limine/limine.conf
 	cp limine/limine-bios.sys limine/limine-bios-cd.bin \
 	   limine/limine-uefi-cd.bin $@.root/boot/limine/
@@ -117,4 +130,4 @@ test: all limine/limine
 clean:
 	rm -rf $(BUILD)
 
--include $(OBJS:.o=.d) $(ULIB_OBJS:.o=.d) $(ROOT_OBJS:.o=.d)
+-include $(OBJS:.o=.d) $(ULIB_OBJS:.o=.d) $(USER_OBJS:.o=.d)

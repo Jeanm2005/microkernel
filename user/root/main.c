@@ -1,19 +1,11 @@
-/* The root task: the first user program. For now it proves that user mode
- * works; from M6 it becomes the supervisor that starts every server. */
+/* The root task: the first user program. Started in ROOT_MODE_INIT it
+ * starts the system from a manifest (init.c); the other modes are the
+ * kernel's user-mode and IPC self-tests. */
 #include <stdint.h>
 #include <abi/selftest.h>
 #include "root.h"
 #include "syscall.h"
 #include "ulib.h"
-
-int failures;
-
-void check(int ok, const char *what)
-{
-    printf("%s: %s\n", ok ? "ok" : "FAILED", what);
-    if (!ok)
-        failures++;
-}
 
 uint64_t rdtsc(void)
 {
@@ -55,6 +47,8 @@ static void misbehave(long mode)
 
 int main(long mode)
 {
+    if (mode == ROOT_MODE_INIT || mode == ROOT_MODE_INIT_CRASH)
+        return init_main(mode);
     if (mode == ROOT_MODE_IPC_SERVER || mode == ROOT_MODE_IPC_SERVER_CRASH)
         return ipc_server(mode);
     if (mode == ROOT_MODE_IPC_CLIENT || mode == ROOT_MODE_IPC_CLIENT_ORPHAN)

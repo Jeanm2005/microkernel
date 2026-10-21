@@ -66,6 +66,8 @@ struct thread *thread_create(const char *name, void (*fn)(void *), void *arg,
 struct thread *thread_new_user(const char *name, void (*fn)(void *), void *arg,
                                uint8_t priority, struct process *proc);
 void thread_start(struct thread *t);
+/* Free a thread made by thread_new_user() that was never started. */
+void thread_discard(struct thread *t);
 __attribute__((noreturn)) void thread_exit(void);
 void thread_yield(void);
 void thread_sleep(uint64_t ticks);

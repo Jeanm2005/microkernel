@@ -57,8 +57,9 @@ static void print_memory_map(void)
 }
 
 /* First thread. Runs on its own stack, so the bootloader's memory can now
- * be reclaimed, then runs the scheduler and user-mode tests and any
- * requested selftest. */
+ * be reclaimed, then runs the scheduler, user-mode and IPC tests, starts
+ * the system (the root task and its manifest), and runs any requested
+ * selftest. */
 static void kinit(void *arg)
 {
     (void)arg;
@@ -69,13 +70,14 @@ static void kinit(void *arg)
     sched_selftest_boot();
     user_selftest_boot(&boot);
     ipc_selftest_boot(&boot);
+    system_selftest_boot(&boot);
 
     char test[32];
     if (cmdline_get(boot.cmdline, "selftest", test, sizeof test)) {
         kprintf("selftest: running '%s'\n", test);
         if (!core_selftest_run(test) && !sched_selftest_run(test) &&
             !user_selftest_run(test, &boot) && !ipc_selftest_run(test, &boot) &&
-            !arch_selftest_run(test))
+            !system_selftest_run(test, &boot) && !arch_selftest_run(test))
             panic("unknown selftest '%s'", test);
     }
 

@@ -1,7 +1,7 @@
 #include <stdarg.h>
 #include <stdbool.h>
 #include <stdint.h>
-#include <syscall.h>
+#include "syscall.h"
 #include "ulib.h"
 
 size_t strlen(const char *s)
@@ -27,6 +27,22 @@ void *memcpy(void *restrict dst, const void *restrict src, size_t n)
     while (n--)
         *d++ = *s++;
     return dst;
+}
+
+int strcmp(const char *a, const char *b)
+{
+    while (*a && *a == *b)
+        a++, b++;
+    return (unsigned char)*a - (unsigned char)*b;
+}
+
+int failures;
+
+void check(int ok, const char *what)
+{
+    printf("%s: %s\n", ok ? "ok" : "FAILED", what);
+    if (!ok)
+        failures++;
 }
 
 struct out {
@@ -72,44 +88,44 @@ int printf(const char *fmt, ...)
             fmt++;
         }
         switch (*fmt) {
-            case 'c':
-                put(&o, (char)va_arg(ap, int));
-                break;
-            case 's': {
-                const char *s = va_arg(ap, const char *);
-                for (s = s ? s : "(null)"; *s; s++)
-                    put(&o, *s);
-                break;
+        case 'c':
+            put(&o, (char)va_arg(ap, int));
+            break;
+        case 's': {
+            const char *s = va_arg(ap, const char *);
+            for (s = s ? s : "(null)"; *s; s++)
+                put(&o, *s);
+            break;
+        }
+        case 'd': {
+            int64_t v = lng ? va_arg(ap, int64_t) : va_arg(ap, int);
+            if (v < 0) {
+                put(&o, '-');
+                v = -v;
             }
-            case 'd': {
-                int64_t v = lng ? va_arg(ap, int64_t) : va_arg(ap, int);
-                if (v < 0) {
-                    put(&o, '-');
-                    v = -v;
-                }
-                put_uint(&o, (uint64_t)v, 10);
-                break;
-            }
-            case 'u':
-                put_uint(&o, lng ? va_arg(ap, uint64_t) : va_arg(ap, unsigned), 10);
-                break;
-            case 'x':
-                put_uint(&o, lng ? va_arg(ap, uint64_t) : va_arg(ap, unsigned), 16);
-                break;
-            case 'p':
-                put(&o, '0');
-                put(&o, 'x');
-                put_uint(&o, (uint64_t)va_arg(ap, void *), 16);
-                break;
-            case '%':
-                put(&o, '%');
-                break;
-            case '\0':
-                fmt--;
-                break;
-            default:
-                put(&o, '%');
-                put(&o, *fmt);
+            put_uint(&o, (uint64_t)v, 10);
+            break;
+        }
+        case 'u':
+            put_uint(&o, lng ? va_arg(ap, uint64_t) : va_arg(ap, unsigned), 10);
+            break;
+        case 'x':
+            put_uint(&o, lng ? va_arg(ap, uint64_t) : va_arg(ap, unsigned), 16);
+            break;
+        case 'p':
+            put(&o, '0');
+            put(&o, 'x');
+            put_uint(&o, (uint64_t)va_arg(ap, void *), 16);
+            break;
+        case '%':
+            put(&o, '%');
+            break;
+        case '\0':
+            fmt--;
+            break;
+        default:
+            put(&o, '%');
+            put(&o, *fmt);
         }
     }
     va_end(ap);

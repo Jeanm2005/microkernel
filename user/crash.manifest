@@ -1,0 +1,8 @@
+# Used by `selftest=app-crash`: same as system.manifest, plus an
+# application that crashes after printing (arg 1 = HELLO_CRASH). The
+# console and the other application must not notice.
+#
+# name      image         priority  provides  uses      arg
+console     console.elf   200       console   -         0
+crasher     hello.elf     100       -         console   1
+hello       hello.elf     100       -         console   0

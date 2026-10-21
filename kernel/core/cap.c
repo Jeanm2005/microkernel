@@ -22,6 +22,22 @@ int64_t cspace_insert(struct cspace *cs, struct kobj *obj, uint32_t rights, uint
     return -ERR_FULL;
 }
 
+int64_t cspace_insert_at(struct cspace *cs, int64_t slot, struct kobj *obj,
+                         uint32_t rights, uint64_t badge)
+{
+    if (slot <= 0 || slot >= CSPACE_SLOTS)
+        return -ERR_INVAL;
+    uint64_t flags = irq_save();
+    if (cs->slot[slot].obj) {
+        irq_restore(flags);
+        return -ERR_EXIST;
+    }
+    kobj_get(obj);
+    cs->slot[slot] = (struct cap){ .obj = obj, .rights = rights & CAP_ALL, .badge = badge };
+    irq_restore(flags);
+    return slot;
+}
+
 int64_t cspace_lookup(struct cspace *cs, int64_t slot, uint32_t type, uint32_t rights,
                       struct cap **out)
 {
@@ -36,19 +52,28 @@ int64_t cspace_lookup(struct cspace *cs, int64_t slot, uint32_t type, uint32_t r
     return 0;
 }
 
-int64_t cspace_copy(struct cspace *cs, int64_t slot, uint32_t rights, uint64_t badge)
+int64_t cspace_derive(struct cspace *src, int64_t slot, struct cspace *dst, int64_t dst_slot,
+                      uint32_t rights, uint64_t badge)
 {
-    struct cap *src;
-    int64_t err = cspace_lookup(cs, slot, 0, 0, &src);
+    struct cap *c;
+    int64_t err = cspace_lookup(src, slot, 0, 0, &c);
     if (err)
         return err;
-    if (rights & ~src->rights)
+    if (rights & ~c->rights)
         return -ERR_PERM;   /* a copy can never have more rights */
-    if (badge && (src->obj->type != KOBJ_ENDPOINT && src->obj->type != KOBJ_NOTIFICATION))
+    if (badge && (c->obj->type != KOBJ_ENDPOINT && c->obj->type != KOBJ_NOTIFICATION))
         return -ERR_INVAL;
-    if (badge && src->badge && badge != src->badge)
+    if (badge && c->badge && badge != c->badge)
         return -ERR_PERM;   /* no re-badging */
-    return cspace_insert(cs, src->obj, rights, badge ? badge : src->badge);
+    uint64_t b = badge ? badge : c->badge;
+    if (dst_slot)
+        return cspace_insert_at(dst, dst_slot, c->obj, rights, b);
+    return cspace_insert(dst, c->obj, rights, b);
+}
+
+int64_t cspace_copy(struct cspace *cs, int64_t slot, uint32_t rights, uint64_t badge)
+{
+    return cspace_derive(cs, slot, cs, 0, rights, badge);
 }
 
 int64_t cspace_delete(struct cspace *cs, int64_t slot)

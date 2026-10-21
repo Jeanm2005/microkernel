@@ -6,13 +6,7 @@
 # process exit status (code << 1) | 1:
 #   1   = kernel finished normally (qemu_exit(0))
 #   3   = kernel panicked          (qemu_exit(1))
-#   0   = triple fault (with -no-reboot QEMU shuts down instead of resetting)
-#   124 = timed out (kernel hung)
-#
-# Recent QEMU versions deliver isa-debug-exit as a shutdown request, which
-# -no-shutdown in QEMUFLAGS would turn into a pause, so each case overrides
-# it with -action shutdown=poweroff. stdin is /dev/null so QEMU, running in
-# the background under `timeout`, never touches the terminal.
+#   124 = timed out (kernel hung or triple-faulted and rebooted)
 
 set -u
 : "${QEMU:?}" "${QEMUFLAGS:?}" "${BUILD:?}"
@@ -28,7 +22,7 @@ run_case() {
 
     make -s iso ISO="$iso" CMDLINE="$cmdline" >/dev/null || { echo "FAIL $name (ISO build)"; failed=1; return; }
     # shellcheck disable=SC2086  # QEMUFLAGS is meant to be split into words
-    timeout 20 $QEMU $QEMUFLAGS -action shutdown=poweroff -cdrom "$iso" \
+    timeout 20 $QEMU $QEMUFLAGS -cdrom "$iso" \
         -device isa-debug-exit,iobase=0xf4,iosize=0x04 </dev/null >"$log" 2>&1
     status=$?
 
@@ -89,6 +83,23 @@ run_case boot "" 1 \
     "[pong] quitting" \
     "[ping] done, 0 failure(s)" \
     "selftest: ipc ok" \
+    "[root] read system.manifest: 2 programs" \
+    "[root] ok: can't create a process above its own priority" \
+    "[root] ok: a process image must come from a module capability" \
+    "[root] ok: a process that was never started can be discarded" \
+    "[root] console serves 'console'" \
+    "[root] hello uses 'console' as client 1" \
+    "[root] started console (priority 200)" \
+    "[console] ready" \
+    "[hello] ok: holds only the capabilities its manifest line lists" \
+    "[hello] ok: can send to the console but not receive from it" \
+    "[console] client 1: hello from a client of the console server" \
+    "[hello] ok: the console refuses a shutdown request from a client" \
+    "[root] hello exited with code 0" \
+    "[console] shutting down" \
+    "[root] console shut down" \
+    "[root] system finished, 0 failure(s)" \
+    "selftest: system ok" \
     "kernel: init complete"
 
 run_case pagefault "selftest=pagefault" 3 \
@@ -141,6 +152,18 @@ run_case ipc-server-dies "selftest=ipc-server-dies" 1 \
     "process: killed 'pong': PAGE FAULT (#PF)" \
     "[ping] ok: call returns -ERR_DEAD when the server dies mid-call" \
     "selftest: client got -ERR_DEAD when its server died; kernel survived" \
+    "kernel: init complete"
+
+# One application crashes; the console and the other application carry on.
+run_case app-crash "selftest=app-crash" 1 \
+    "[root] read crash.manifest: 3 programs" \
+    "[console] client 1: about to crash" \
+    "process: killed 'crasher': PAGE FAULT (#PF)" \
+    "[root] crasher was killed" \
+    "[console] client 2: hello from a client of the console server" \
+    "[root] hello exited with code 0" \
+    "[root] console shut down" \
+    "selftest: an application crashed; the root task and the console carried on" \
     "kernel: init complete"
 
 run_case unknown-selftest "selftest=nonsense" 3 \

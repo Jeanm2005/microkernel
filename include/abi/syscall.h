@@ -38,24 +38,41 @@ enum syscall_nr {
     SYS_CAP_DELETE  = 11,  /* (slot) -> 0 */
     SYS_OBJ_CREATE  = 12,  /* (factory, type) -> new slot with all rights */
 
+    /* Boot modules (read-only files the bootloader loaded). */
+    SYS_MODULE_INFO = 13,  /* (module, name_buf, buf_len) -> size; name copied out */
+    SYS_MODULE_READ = 14,  /* (module, offset, buf, len) -> bytes copied */
+
+    /* Processes. */
+    SYS_PROC_CREATE = 15,  /* (factory, module, priority, name, name_len) -> new slot */
+    SYS_PROC_GIVE   = 16,  /* (proc, slot, dst_slot, rights, badge) -> 0; copy a cap into it */
+    SYS_PROC_START  = 17,  /* (proc, arg) -> 0; main(arg) starts running */
+    SYS_PROC_WAIT   = 18,  /* (proc) -> 0, exit code in rdi; -ERR_DEAD if it was killed */
+
     SYS_COUNT
 };
 
 /* Rights a capability can carry. A copy can only have fewer. */
-#define CAP_READ    (1 << 0)   /* recv on an endpoint, wait on a notification */
-#define CAP_WRITE   (1 << 1)   /* send/call on an endpoint, notify */
+#define CAP_READ    (1 << 0)   /* recv, wait, read a module, wait for a process */
+#define CAP_WRITE   (1 << 1)   /* send/call, notify, create from a factory,
+                                  give caps to or start a process */
 #define CAP_GRANT   (1 << 2)   /* caps may travel in messages over this endpoint */
 #define CAP_ALL     (CAP_READ | CAP_WRITE | CAP_GRANT)
 
-/* Kernel object types (for SYS_OBJ_CREATE). */
+/* Kernel object types. Only endpoints and notifications can be made with
+ * SYS_OBJ_CREATE; processes come from SYS_PROC_CREATE, and factories and
+ * modules only from the kernel at boot. */
 #define OBJ_ENDPOINT      1
 #define OBJ_NOTIFICATION  2
+#define OBJ_FACTORY       3
+#define OBJ_MODULE        4
+#define OBJ_PROCESS       5
 
 /* Errors (returned negated). */
 #define ERR_PERM    1    /* the capability lacks a needed right */
 #define ERR_BADCAP  9    /* no capability in that slot */
 #define ERR_NOMEM   12   /* out of kernel memory or factory budget */
 #define ERR_FAULT   14   /* a pointer argument isn't valid user memory */
+#define ERR_EXIST   17   /* the destination slot is already in use */
 #define ERR_INVAL   22   /* an argument is out of range */
 #define ERR_FULL    28   /* the capability table is full */
 #define ERR_DEAD    32   /* the other side of the call died */

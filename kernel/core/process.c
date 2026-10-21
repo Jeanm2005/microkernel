@@ -103,7 +103,26 @@ fail_obj:
 
 void process_start(struct process *p)
 {
+    p->started = true;
     thread_start(p->thread);
+}
+
+void process_handle_gone(struct process *p)
+{
+    if (p->started) {
+        process_put(p);
+        return;
+    }
+    /* Never ran, so its address space was never active and its thread is
+     * in no queue: free both directly, then drop the thread's reference
+     * and the handle's. */
+    thread_discard(p->thread);
+    p->thread = NULL;
+    paging_destroy_root(p->root, true);
+    p->root = 0;
+    cspace_clear(&p->cspace);
+    process_put(p);
+    process_put(p);
 }
 
 struct process *process_spawn(const char *name, const void *elf, size_t size,
@@ -199,4 +218,22 @@ int64_t process_debug_write(uint64_t user_buf, uint64_t len)
         }
     }
     return (int64_t)len;
+}
+
+int64_t copy_to_user(uint64_t dst, const void *src, uint64_t len)
+{
+    struct process *p = thread_current()->proc;
+    if (!p || !paging_user_range_ok(p->root, dst, len, true))
+        return -ERR_FAULT;
+    memcpy((void *)dst, src, len);
+    return 0;
+}
+
+int64_t copy_from_user(void *dst, uint64_t src, uint64_t len)
+{
+    struct process *p = thread_current()->proc;
+    if (!p || !paging_user_range_ok(p->root, src, len, false))
+        return -ERR_FAULT;
+    memcpy(dst, (const void *)src, len);
+    return 0;
 }

@@ -39,9 +39,10 @@ be restarted by a supervisor, and the rest of the system keeps running.**
    driver thread that holds the IRQ (interrupt request line) capability.
 
 Not in the kernel: device drivers (except the early debug serial and the
-timer the scheduler needs), file systems, networking, ELF (executable file
-format) loading of anything but the root task, process-management policy,
-POSIX (the Unix API standard).
+timer the scheduler needs), file systems, networking, process-management
+policy, POSIX (the Unix API standard). One exception for now: ELF
+(executable file format) loading stays in the kernel until user space can
+map memory (see Starting the system).
 
 ```
  ┌──────────────────────── ring 3 ───────────────────────────────┐
@@ -65,20 +66,27 @@ kernel/
                   lapic.h) live here
   core/           portable kernel logic (main, panic, cmdline, pmm, slab,
                   kstack, sched, process, elf, syscall, object, cap, ipc,
-                  self-tests)
+                  spawn, self-tests)
   lib/            freestanding libc pieces (string, kprintf)
   include/arch/   interface core/ uses to reach arch code
   include/kernel/ core interfaces
   linker.ld
 include/abi/      what the kernel and user programs share: syscall numbers,
-                  rights, error codes, test protocol (no kernel internals)
+                  rights, error codes, initial capability slots (boot.h),
+                  server protocols (proto.h, console.h), test protocol
+                  (no kernel internals)
 user/
-  lib/            user runtime: crt0 (_start), syscall and IPC wrappers, printf
-  root/           the root task (also runs the IPC test server and client)
+  lib/            user runtime: crt0 (_start), syscall and IPC wrappers,
+                  printf, console client
+  root/           the root task: starts the system from a manifest (init.c);
+                  also runs the kernel's user-mode and IPC tests
+  console/        the console server
+  hello/          a console client
+  *.manifest      which programs the root task starts, and with what
   linker.ld       user programs load at 0x400000
 scripts/test.sh   boot-and-check test runner (`make test`)
 docs/DESIGN.md
-limine.conf       also loads user/root.elf as a boot module
+limine.conf       loads the user programs and manifests as boot modules
 ```
 
 Rule: `core/` never includes `<limine.h>` or uses inline asm; it goes through
@@ -118,9 +126,10 @@ case with a different kernel command line (`CMDLINE`, passed through
 
 Destructive tests are selected with `selftest=<name>` (memory tests in
 `core/selftest.c`, scheduler tests in `core/selftest_sched.c`, user tests
-in `core/selftest_user.c`, IPC tests in `core/selftest_ipc.c`, CPU tests
-in `arch/x86_64/selftest.c`). The user and IPC tests are the exception:
-the kernel must survive them, so they end with status 1.
+in `core/selftest_user.c`, IPC tests in `core/selftest_ipc.c`, system
+tests in `core/selftest_system.c`, CPU tests in `arch/x86_64/selftest.c`).
+The user, IPC and system tests are the exception: the kernel must survive
+them, so they end with status 1.
 
 Every boot also runs the non-destructive tests:
 - from `kmain`: an `int3` round trip, and PMM, paging (including switching
@@ -134,7 +143,10 @@ Every boot also runs the non-destructive tests:
   memory are verified;
 - the IPC test (see IPC below): a server and a client process, checking
   both exit codes, the number of direct switches, and that every frame
-  came back.
+  came back;
+- the system itself (see Starting the system below): the root task runs
+  `system.manifest`, and the kernel checks it exited cleanly and that
+  every frame came back.
 
 ## Memory (M2)
 
@@ -312,7 +324,8 @@ Every boot also runs the non-destructive tests:
   badged endpoint cap carries that badge, and the receiver sees it.
 - **Objects** (`struct kobj`) are reference-counted: each capability and
   each thread blocked on the object holds one; the last `kobj_put` frees
-  it. Types so far: endpoint, notification, factory.
+  it. Types so far: endpoint, notification, factory, module and process
+  (the last two since M6).
 - **Factories** replace seL4's untyped memory with something simpler:
   creating a kernel object requires a factory capability, and each factory
   has a budget. Freeing an object refunds its factory (which stays alive
@@ -325,19 +338,67 @@ Every boot also runs the non-destructive tests:
 - x86-specific (later): I/O-port capabilities enforced through the TSS
   I/O permission bitmap.
 
+## Starting the system (M6)
+
+- **What the kernel hands over**: the root task is the only process the
+  kernel creates by itself. It starts at priority 250 with a factory
+  (slot 1, budget 32 objects) and one read-only capability per boot
+  module (slots 2 and up, in load order). That is all the authority in the
+  system; everything else is derived from it (`include/abi/boot.h`).
+- **Manifest**: a text file loaded as a boot module, one program per line:
+  name, image (a module), priority, the service it provides (or `-`), the
+  services it uses (comma-separated, or `-`), and an argument for `main`.
+  The root task reads it with `module_read`.
+- **What each program gets**: a server gets a receive capability
+  (READ|GRANT) for its own endpoint in slot 1; a client gets a send
+  capability (WRITE|GRANT) for each service it uses, in slots 2, 3, ... in
+  the order listed, each with a badge unique to that client. Nothing else.
+  `hello` checks every one of its 63 slots to prove it.
+- **Order**: the root task first creates an endpoint per service, then the
+  processes (handing out capabilities before any of them runs), then
+  starts them all. Everything runs below the root task's priority, so
+  nothing starts running until the root task blocks.
+- **Process objects**: `proc_create` returns a process capability. WRITE
+  lets the holder give the process capabilities (`proc_give`, which uses
+  the same derivation rules as `cap_copy`, into a chosen slot) and start
+  it; READ lets it wait for the exit code (`proc_wait`, or `-ERR_DEAD` if
+  the process was killed). A process can't be created above its creator's
+  priority. If the last capability to a process that was never started is
+  dropped, the process is destroyed.
+- **The root task's own capability is unbadged**: every client's cap is
+  badged (>= 1), so a request with badge 0 can only come from the root
+  task. Servers accept `PROTO_SHUTDOWN` only from badge 0. The root task
+  shuts servers down in reverse order once every application has exited.
+- **Console**: collects each client's text into lines and prints them
+  prefixed with the badge. Text travels in the message words (24 bytes per
+  call) until processes can share memory. It still prints through the
+  kernel's `debug_write`; driving the UART itself is M7.
+- **Crash isolation**: `selftest=app-crash` runs `crash.manifest`, in which
+  one application crashes after printing. The root task sees `-ERR_DEAD`
+  from `proc_wait`, the other application and the console carry on, and
+  shutdown proceeds normally.
+- **Known compromises**:
+  - The kernel still loads ELF images (`proc_create` takes a module
+    capability), because user space can't map memory into another address
+    space yet. In seL4 the root task does this itself from untyped memory
+    and frame capabilities; here that waits for `map`/`unmap`.
+  - A process costs one unit of factory budget, the same as an endpoint,
+    although it uses far more memory (page tables, stack, image). Budgets
+    count objects, not bytes.
+  - Servers are started by the root task, not restarted: supervision is
+    M9.
+
 ## Drivers and modules
 
-- A "module" is a user-space server binary.
-- The root task is the first and only process the kernel loads (from a
-  Limine module). It reads a manifest, starts each server, and hands it
-  exactly the capabilities it needs (e.g. the console server gets the COM1
-  I/O-port cap and IRQ 4).
+- A "module" is a user-space program image (or a manifest) loaded by the
+  bootloader. The root task starts the programs (see above). From M7, the
+  console server also gets the COM1 I/O-port capability and IRQ 4.
 - **Supervision**: the root task holds a notification bound to each child's
   fault handler. On a fault it tears the server down, restarts it, and
   re-hands its caps. Clients see an IPC error and reconnect.
 - **Interfaces**: each server's message protocol is a versioned header in
-  `proto/` shared by server and clients. No IDL until hand-written protocols
-  hurt.
+  `include/abi/` shared by server and clients (`proto.h` for the common
+  rules, `console.h`, ...). No IDL until hand-written protocols hurt.
 - **PCI**: a user-space PCI server owns ECAM, enumerates devices and hands
   out per-device config/BAR/MSI caps to drivers.
 
@@ -350,7 +411,7 @@ object types and error codes live in `include/abi/syscall.h`.
 
 | # | Call | Notes |
 |---|---|---|
-| 0 | `debug_write(buf, len) -> len` | debug only; goes away once the console server exists |
+| 0 | `debug_write(buf, len) -> len` | debug only; the console server prints through it until M7 |
 | 1 | `exit(code)` | |
 | 2 | `yield()` | |
 | 3 | `send(ep, w0..w3, cap)` | needs WRITE (GRANT to send a cap) |
@@ -363,7 +424,13 @@ object types and error codes live in `include/abi/syscall.h`.
 | 10 | `cap_copy(slot, rights, badge) -> slot` | rights must be a subset |
 | 11 | `cap_delete(slot)` | |
 | 12 | `obj_create(factory, type) -> slot` | endpoint or notification; uses budget |
-| later | `map`, `unmap`, `thread_create`, `process_create`, `cap_revoke` | M6/M9 |
+| 13 | `module_info(mod, name_buf, len) -> size` | needs READ; copies the name out |
+| 14 | `module_read(mod, offset, buf, len) -> bytes` | needs READ |
+| 15 | `proc_create(factory, mod, prio, name, len) -> slot` | ELF from a module; prio <= caller's; uses budget |
+| 16 | `proc_give(proc, slot, dst_slot, rights, badge)` | needs WRITE; cap_copy rules, into another table |
+| 17 | `proc_start(proc, arg)` | needs WRITE; once |
+| 18 | `proc_wait(proc) -> code` | needs READ; `-ERR_DEAD` if killed |
+| later | `map`, `unmap`, `thread_create`, `cap_revoke` | M8/M9 |
 
 ## Milestones
 
@@ -375,7 +442,7 @@ object types and error codes live in `include/abi/syscall.h`.
 | **M3** | LAPIC timer, kernel threads, scheduler | two kernel threads that never yield share the CPU; stack overflow caught by guard page ✅ |
 | **M4** | Ring 3, `syscall`, root task loaded from an ELF module | root task prints via a syscall; preempted in ring 3 and resumed; a faulting process is killed and the kernel survives ✅ |
 | **M5** | Endpoints, notifications, capability tables | two processes talk only through capabilities they were given: 1000 call/reply round trips on the fast path, a capability passed in a reply, a cross-process notification; a dying server returns -ERR_DEAD to its caller ✅ |
-| M6 | Root task spawns servers from a manifest | console server running in ring 3 |
+| **M6** | Root task spawns servers from a manifest | the root task starts a console server and a client from `system.manifest`, each holding only the capabilities its line grants; one crashing application leaves the rest running ✅ |
 | M7 | User-space serial console driver (IRQ via notification) | kernel stops printing directly |
 | M8 | PCI server + virtio-blk/AHCI driver + tiny FS server | `cat` a file from disk |
 | M9 | Fault supervision + restart | kill the disk driver, system survives |

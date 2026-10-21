@@ -211,6 +211,12 @@ void thread_start(struct thread *t)
     start_thread(t);
 }
 
+void thread_discard(struct thread *t)
+{
+    kstack_free(t->kstack_top);
+    slab_free(&thread_cache, t);
+}
+
 void thread_exit(void)
 {
     cpu_cli();

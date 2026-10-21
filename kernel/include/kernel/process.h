@@ -22,6 +22,8 @@ struct process {
     uint64_t       entry;          /* first user instruction */
     uint64_t       arg;            /* passed to the program in rdi */
 
+    bool           started;        /* process_start() has run */
+
     /* Status, written once by the dying thread and read by waiters. */
     volatile bool  exited;
     int            exit_code;      /* valid if exited && !killed */
@@ -53,6 +55,11 @@ int64_t process_give_cap(struct process *p, struct kobj *obj, uint32_t rights, u
 void process_wait(struct process *p);
 void process_put(struct process *p);
 
+/* The last capability to the process is gone (object.c calls this). A
+ * running or finished process just loses that reference; one that was
+ * never started is destroyed, since nobody can start it any more. */
+void process_handle_gone(struct process *p);
+
 /* For the current user thread: end the process normally (system call) or
  * forcibly (fatal fault). Neither returns. */
 __attribute__((noreturn)) void process_exit_current(int code);
@@ -65,3 +72,9 @@ void process_thread_gone(struct process *p);
 /* SYS_DEBUG_WRITE: copy `len` bytes from user memory and print them,
  * each line prefixed with the process name. */
 int64_t process_debug_write(uint64_t user_buf, uint64_t len);
+
+/* Copy between the kernel and the current process's memory. Return 0, or
+ * -ERR_FAULT (copying nothing) if any byte of the user range isn't
+ * accessible (writable, for copy_to_user). */
+int64_t copy_to_user(uint64_t dst, const void *src, uint64_t len);
+int64_t copy_from_user(void *dst, uint64_t src, uint64_t len);
