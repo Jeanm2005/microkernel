@@ -1,4 +1,5 @@
 #include <arch/cpu.h>
+#include <kernel/irq.h>
 #include <kernel/kprintf.h>
 #include <kernel/object.h>
 #include <kernel/panic.h>
@@ -7,7 +8,7 @@
 #include <kernel/string.h>
 
 static struct slab_cache endpoint_cache, notification_cache, factory_cache,
-                         module_cache, process_obj_cache;
+                         module_cache, process_obj_cache, ioport_cache, irq_cache;
 
 void object_init(void)
 {
@@ -16,6 +17,8 @@ void object_init(void)
     slab_cache_init(&factory_cache, "factory", sizeof(struct factory));
     slab_cache_init(&module_cache, "module", sizeof(struct module));
     slab_cache_init(&process_obj_cache, "process_obj", sizeof(struct process_obj));
+    slab_cache_init(&ioport_cache, "ioport", sizeof(struct ioport));
+    slab_cache_init(&irq_cache, "irq", sizeof(struct irq));
 }
 
 static struct slab_cache *cache_for(uint32_t type)
@@ -26,6 +29,8 @@ static struct slab_cache *cache_for(uint32_t type)
     case KOBJ_FACTORY:      return &factory_cache;
     case KOBJ_MODULE:       return &module_cache;
     case KOBJ_PROCESS:      return &process_obj_cache;
+    case KOBJ_IOPORT:       return &ioport_cache;
+    case KOBJ_IRQ:          return &irq_cache;
     default:                return NULL;
     }
 }
@@ -38,6 +43,8 @@ const char *kobj_type_name(uint32_t type)
     case KOBJ_FACTORY:      return "factory";
     case KOBJ_MODULE:       return "module";
     case KOBJ_PROCESS:      return "process";
+    case KOBJ_IOPORT:       return "ioport";
+    case KOBJ_IRQ:          return "irq";
     default:                return "?";
     }
 }
@@ -98,6 +105,25 @@ struct kobj *module_create(const char *name, const void *data, uint64_t size)
     return &m->obj;
 }
 
+struct kobj *ioport_create(uint16_t base, uint16_t count)
+{
+    struct ioport *io = (struct ioport *)kobj_create(KOBJ_IOPORT, NULL);
+    if (!io)
+        return NULL;
+    io->base = base;
+    io->count = count;
+    return &io->obj;
+}
+
+struct kobj *irq_create(uint32_t line)
+{
+    struct irq *q = (struct irq *)kobj_create(KOBJ_IRQ, NULL);
+    if (!q)
+        return NULL;
+    q->line = line;
+    return &q->obj;
+}
+
 void kobj_get(struct kobj *o)
 {
     uint64_t flags = irq_save();
@@ -120,7 +146,10 @@ void kobj_put(struct kobj *o)
         struct endpoint *ep = (struct endpoint *)o;
         kassert(waitq_empty(&ep->senders) && waitq_empty(&ep->receivers));
     } else if (o->type == KOBJ_NOTIFICATION) {
-        kassert(waitq_empty(&((struct notification *)o)->waiters));
+        struct notification *n = (struct notification *)o;
+        kassert(waitq_empty(&n->waiters) && !n->bound);   /* a bound thread holds a ref */
+    } else if (o->type == KOBJ_IRQ) {
+        irq_release((struct irq *)o);
     } else if (o->type == KOBJ_PROCESS) {
         struct process *p = ((struct process_obj *)o)->proc;
         if (p)

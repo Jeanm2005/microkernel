@@ -68,6 +68,7 @@ struct process *process_create(const char *name, const void *elf, size_t size,
     memcpy(p->name, name, n);
     p->arg = arg;
     p->at_line_start = true;
+    p->may_debug_write = true;   /* sys_proc_create() takes it away */
 
     p->root = paging_new_root();
     if (p->root == PMM_NONE) {
@@ -191,6 +192,8 @@ int64_t process_debug_write(uint64_t user_buf, uint64_t len)
     struct process *p = thread_current()->proc;
     if (!p)
         return -ERR_INVAL;
+    if (!p->may_debug_write)
+        return -ERR_PERM;
     if (len > DEBUG_WRITE_MAX)
         return -ERR_INVAL;
     /* Never dereference a user pointer before checking it: a bad one

@@ -67,13 +67,17 @@ static void kinit(void *arg)
             thread_current()->name, thread_current()->id);
     pmm_reclaim_bootloader(&boot);
 
+    char test[32];
+    bool have_test = cmdline_get(boot.cmdline, "selftest", test, sizeof test);
+
     sched_selftest_boot();
     user_selftest_boot(&boot);
     ipc_selftest_boot(&boot);
-    system_selftest_boot(&boot);
+    /* A named system test runs the system its own way instead. */
+    if (!have_test || !system_selftest_wanted(test))
+        system_selftest_boot(&boot);
 
-    char test[32];
-    if (cmdline_get(boot.cmdline, "selftest", test, sizeof test)) {
+    if (have_test) {
         kprintf("selftest: running '%s'\n", test);
         if (!core_selftest_run(test) && !sched_selftest_run(test) &&
             !user_selftest_run(test, &boot) && !ipc_selftest_run(test, &boot) &&

@@ -8,6 +8,7 @@
 #include <kernel/mm.h>
 #include <kernel/panic.h>
 #include "lapic.h"
+#include "pic.h"
 
 #define MSR_APIC_BASE      0x1b
 #define APIC_BASE_ENABLE   (1ull << 11)
@@ -18,6 +19,7 @@
 #define LAPIC_EOI          0x0b0
 #define LAPIC_SVR          0x0f0   /* spurious vector + software enable */
 #define LAPIC_LVT_TIMER    0x320
+#define LAPIC_LVT_LINT0    0x350
 #define LAPIC_TIMER_INIT   0x380
 #define LAPIC_TIMER_CUR    0x390
 #define LAPIC_TIMER_DIV    0x3e0
@@ -25,6 +27,7 @@
 #define SVR_ENABLE         (1u << 8)
 #define LVT_MASKED         (1u << 16)
 #define LVT_PERIODIC       (1u << 17)
+#define LVT_EXTINT         (7u << 8)    /* deliver as an external (8259) interrupt */
 #define DIV_BY_16          0x3
 
 #define PIT_HZ             1193182u
@@ -38,18 +41,6 @@ static void lapic_write(uint32_t reg, uint32_t v) { lapic[reg / 4] = v; }
 void lapic_eoi(void)
 {
     lapic_write(LAPIC_EOI, 0);
-}
-
-/* The 8259 PIC (programmable interrupt controller) is the pre-APIC
- * interrupt controller. We don't use it, but it still exists: move its
- * vectors away from the CPU exception range, then mask every line. */
-static void pic_disable(void)
-{
-    outb(0x20, 0x11); outb(0xa0, 0x11);                  /* start init sequence */
-    outb(0x21, VEC_PIC_BASE); outb(0xa1, VEC_PIC_BASE + 8);
-    outb(0x21, 0x04); outb(0xa1, 0x02);                  /* cascade wiring */
-    outb(0x21, 0x01); outb(0xa1, 0x01);                  /* 8086 mode */
-    outb(0x21, 0xff); outb(0xa1, 0xff);                  /* mask all */
 }
 
 static void lapic_enable(void)
@@ -69,6 +60,10 @@ static void lapic_enable(void)
 
     lapic_write(LAPIC_TPR, 0);
     lapic_write(LAPIC_SVR, SVR_ENABLE | VEC_LAPIC_SPURIOUS);
+    /* The 8259 PIC is wired to LINT0. Passing its interrupts through
+     * ("virtual wire" mode) is how legacy device interrupts (IRQ 4 for
+     * COM1) reach us; every line stays masked until a driver binds it. */
+    lapic_write(LAPIC_LVT_LINT0, LVT_EXTINT);
 }
 
 /* Count LAPIC timer ticks (divide-by-16) during CALIBRATE_MS, timed by PIT
@@ -101,7 +96,7 @@ static uint32_t calibrate(void)
 
 void arch_timer_init(uint32_t hz)
 {
-    pic_disable();
+    pic_init();
     lapic_enable();
 
     uint32_t per_calib = calibrate();

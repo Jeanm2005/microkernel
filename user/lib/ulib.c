@@ -1,6 +1,7 @@
 #include <stdarg.h>
 #include <stdbool.h>
 #include <stdint.h>
+#include "console.h"
 #include "syscall.h"
 #include "ulib.h"
 
@@ -45,18 +46,17 @@ void check(int ok, const char *what)
         failures++;
 }
 
+/* ---- formatting ---------------------------------------------------------- */
+
 struct out {
-    char buf[256];
-    size_t len;
+    char  *buf;
+    size_t size, len;   /* len never exceeds size - 1 */
 };
 
 static void put(struct out *o, char c)
 {
-    if (o->len == sizeof o->buf) {
-        sys_debug_write(o->buf, o->len);
-        o->len = 0;
-    }
-    o->buf[o->len++] = c;
+    if (o->len + 1 < o->size)
+        o->buf[o->len++] = c;
 }
 
 static void put_uint(struct out *o, uint64_t v, unsigned base)
@@ -71,11 +71,9 @@ static void put_uint(struct out *o, uint64_t v, unsigned base)
         put(o, tmp[--i]);
 }
 
-int printf(const char *fmt, ...)
+int vsnprintf(char *buf, size_t size, const char *fmt, va_list ap)
 {
-    struct out o = { .len = 0 };
-    va_list ap;
-    va_start(ap, fmt);
+    struct out o = { .buf = buf, .size = size, .len = 0 };
     for (; *fmt; fmt++) {
         if (*fmt != '%') {
             put(&o, *fmt);
@@ -128,8 +126,39 @@ int printf(const char *fmt, ...)
             put(&o, *fmt);
         }
     }
+    if (size)
+        buf[o.len] = '\0';
+    return (int)o.len;
+}
+
+int snprintf(char *buf, size_t size, const char *fmt, ...)
+{
+    va_list ap;
+    va_start(ap, fmt);
+    int n = vsnprintf(buf, size, fmt, ap);
     va_end(ap);
-    if (o.len)
-        sys_debug_write(o.buf, o.len);
-    return 0;
+    return n;
+}
+
+/* ---- printf -------------------------------------------------------------- */
+
+static long console_ep;
+
+void printf_use_console(long ep)
+{
+    console_ep = ep;
+}
+
+int printf(const char *fmt, ...)
+{
+    char buf[512];
+    va_list ap;
+    va_start(ap, fmt);
+    int n = vsnprintf(buf, sizeof buf, fmt, ap);
+    va_end(ap);
+    if (console_ep)
+        console_write(console_ep, buf, (size_t)n);
+    else
+        sys_debug_write(buf, (size_t)n);
+    return n;
 }

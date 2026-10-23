@@ -35,14 +35,16 @@ be restarted by a supervisor, and the rest of the system keeps running.**
 4. **IPC**: synchronous endpoints + asynchronous notifications.
 5. **Capabilities**: per-process capability table; every kernel object is
    reached only through a capability.
-6. **Interrupt routing**: IOAPIC (I/O APIC) or MSI → notification to the
-   driver thread that holds the IRQ (interrupt request line) capability.
+6. **Interrupt routing**: a device interrupt → notification to the driver
+   thread that holds the IRQ (interrupt request line) capability. Legacy
+   lines go through the 8259 PIC today; the IOAPIC (I/O APIC) and MSI come
+   with PCI devices (M8).
 
-Not in the kernel: device drivers (except the early debug serial and the
-timer the scheduler needs), file systems, networking, process-management
-policy, POSIX (the Unix API standard). One exception for now: ELF
-(executable file format) loading stays in the kernel until user space can
-map memory (see Starting the system).
+Not in the kernel: device drivers (except the timer the scheduler needs and
+a write-only serial log for the kernel's own messages), file systems,
+networking, process-management policy, POSIX (the Unix API standard). One
+exception for now: ELF (executable file format) loading stays in the
+kernel until user space can map memory (see Starting the system).
 
 ```
  ┌──────────────────────── ring 3 ───────────────────────────────┐
@@ -66,9 +68,10 @@ kernel/
                   lapic.h) live here
   core/           portable kernel logic (main, panic, cmdline, pmm, slab,
                   kstack, sched, process, elf, syscall, object, cap, ipc,
-                  spawn, self-tests)
+                  spawn, irq, self-tests)
   lib/            freestanding libc pieces (string, kprintf)
-  include/arch/   interface core/ uses to reach arch code
+  include/arch/   interface core/ uses to reach arch code (incl. irq.h and
+                  ioport.h: interrupt lines and I/O-port permissions)
   include/kernel/ core interfaces
   linker.ld
 include/abi/      what the kernel and user programs share: syscall numbers,
@@ -77,10 +80,10 @@ include/abi/      what the kernel and user programs share: syscall numbers,
                   (no kernel internals)
 user/
   lib/            user runtime: crt0 (_start), syscall and IPC wrappers,
-                  printf, console client
+                  printf/snprintf, console client, port I/O (io.h)
   root/           the root task: starts the system from a manifest (init.c);
                   also runs the kernel's user-mode and IPC tests
-  console/        the console server
+  console/        the console server: the COM1 serial driver
   hello/          a console client
   *.manifest      which programs the root task starts, and with what
   linker.ld       user programs load at 0x400000
@@ -109,8 +112,9 @@ Rule: `core/` never includes `<limine.h>` or uses inline asm; it goes through
   `trap_dispatch()` with the same `struct trap_frame` layout.
 - **Policy today**: `#BP` (breakpoint) prints and resumes; any other
   exception prints the cause, registers, control registers and a
-  frame-pointer backtrace, then panics. Of vectors 32–255, only the timer
-  (0x30) and spurious interrupts are expected (see M3); any other one
+  frame-pointer backtrace, then panics; in user mode it kills the process
+  instead (M4). Of vectors 32–255, only the timer (0x30), the PIC's device
+  lines (0x20–0x2f, M7) and spurious interrupts are expected; any other one
   panics. From M9, faults in user threads go to the supervisor instead.
 - **RSP0**, the kernel stack the CPU loads when a ring-3 thread traps, is
   set in the TSS on every context switch (M3/M4).
@@ -146,7 +150,13 @@ Every boot also runs the non-destructive tests:
   came back;
 - the system itself (see Starting the system below): the root task runs
   `system.manifest`, and the kernel checks it exited cleanly and that
-  every frame came back.
+  every frame came back. A named system test (`app-crash`,
+  `console-input`) runs its own manifest instead.
+
+`console-input` needs typed input: the script runs QEMU with a named pipe
+as its stdin and writes a line into it once the guest prints that it is
+waiting. Text sent earlier could arrive before the kernel sets up the
+UART, which discards it.
 
 ## Memory (M2)
 
@@ -300,6 +310,13 @@ Every boot also runs the non-destructive tests:
 - **Notifications**: a word of bits. `notify` ORs in bits and the cap's
   badge and never blocks; `wait` returns and clears the word, blocking if
   it is zero. Meant for interrupts and events.
+- **Bound notifications** (since M7): a thread can bind one notification
+  to itself (`ntfn_bind`, one per thread and per notification). If it is
+  signalled while the thread is blocked in `recv` or `reply_recv`, the
+  call returns `IPC_NOTIFIED` with the bits instead of a message; pending
+  bits are taken before waiting senders, so clients can't starve a
+  driver's interrupts. One server thread can therefore serve clients and
+  its device at once, as in seL4.
 - **Locking**: every IPC path runs with interrupts off, which on one CPU
   makes each operation atomic.
 - Blocked threads hold a reference to the object they wait on, so an
@@ -325,7 +342,7 @@ Every boot also runs the non-destructive tests:
 - **Objects** (`struct kobj`) are reference-counted: each capability and
   each thread blocked on the object holds one; the last `kobj_put` frees
   it. Types so far: endpoint, notification, factory, module and process
-  (the last two since M6).
+  (since M6), I/O-port range and IRQ line (since M7).
 - **Factories** replace seL4's untyped memory with something simpler:
   creating a kernel object requires a factory capability, and each factory
   has a budget. Freeing an object refunds its factory (which stays alive
@@ -335,25 +352,27 @@ Every boot also runs the non-destructive tests:
 - **Not yet**: revocation (deleting every capability derived from one).
   It needs a derivation tree per object; it comes with supervision in M9,
   where the supervisor must be able to take capabilities back.
-- x86-specific (later): I/O-port capabilities enforced through the TSS
-  I/O permission bitmap.
 
 ## Starting the system (M6)
 
 - **What the kernel hands over**: the root task is the only process the
   kernel creates by itself. It starts at priority 250 with a factory
-  (slot 1, budget 32 objects) and one read-only capability per boot
-  module (slots 2 and up, in load order). That is all the authority in the
-  system; everything else is derived from it (`include/abi/boot.h`).
+  (slot 1, budget 32 objects), COM1's I/O ports and IRQ (slots 2 and 3,
+  since M7) and one read-only capability per boot module (slots 4 and up,
+  in load order). That is all the authority in the system; everything
+  else is derived from it (`include/abi/boot.h`).
 - **Manifest**: a text file loaded as a boot module, one program per line:
   name, image (a module), priority, the service it provides (or `-`), the
-  services it uses (comma-separated, or `-`), and an argument for `main`.
-  The root task reads it with `module_read`.
+  services it uses (comma-separated, or `-`), the devices it drives (or
+  `-`; since M7), and an argument for `main`. The root task reads it with
+  `module_read`.
 - **What each program gets**: a server gets a receive capability
   (READ|GRANT) for its own endpoint in slot 1; a client gets a send
   capability (WRITE|GRANT) for each service it uses, in slots 2, 3, ... in
-  the order listed, each with a badge unique to that client. Nothing else.
-  `hello` checks every one of its 63 slots to prove it.
+  the order listed, each with a badge unique to that client; a driver gets
+  a notification in slot 8 and its devices' capabilities from slot 9.
+  Nothing else. `hello` checks every one of its 63 slots to prove it. A
+  device can be given to only one program.
 - **Order**: the root task first creates an endpoint per service, then the
   processes (handing out capabilities before any of them runs), then
   starts them all. Everything runs below the root task's priority, so
@@ -369,14 +388,11 @@ Every boot also runs the non-destructive tests:
   badged (>= 1), so a request with badge 0 can only come from the root
   task. Servers accept `PROTO_SHUTDOWN` only from badge 0. The root task
   shuts servers down in reverse order once every application has exited.
-- **Console**: collects each client's text into lines and prints them
-  prefixed with the badge. Text travels in the message words (24 bytes per
-  call) until processes can share memory. It still prints through the
-  kernel's `debug_write`; driving the UART itself is M7.
+- **Console**: see Devices (M7).
 - **Crash isolation**: `selftest=app-crash` runs `crash.manifest`, in which
-  one application crashes after printing. The root task sees `-ERR_DEAD`
-  from `proc_wait`, the other application and the console carry on, and
-  shutdown proceeds normally.
+  one application crashes (since M7, by writing to the serial port it
+  doesn't own). The root task sees `-ERR_DEAD` from `proc_wait`, the other
+  application and the console carry on, and shutdown proceeds normally.
 - **Known compromises**:
   - The kernel still loads ELF images (`proc_create` takes a module
     capability), because user space can't map memory into another address
@@ -388,11 +404,56 @@ Every boot also runs the non-destructive tests:
   - Servers are started by the root task, not restarted: supervision is
     M9.
 
+## Devices (M7)
+
+- **I/O ports**: an I/O-port capability names a range of ports.
+  `ioport_enable` sets those bits in the process's permission bitmap; on
+  every context switch the scheduler copies that bitmap into the TSS I/O
+  permission bitmap (128 bytes, ports 0-1023; processes without ports get
+  all-ones), and the CPU checks every `in`/`out` in ring 3 against it. A
+  port outside the bitmap is a #GP and the process is killed
+  (`selftest=app-crash` does exactly that). The permission stays with the
+  process for its lifetime: deleting the capability doesn't revoke it
+  (revocation is M9).
+- **Interrupts**: an IRQ capability names one line. `irq_bind` connects
+  it to a notification and unmasks the line. When it fires, the kernel
+  masks it, acknowledges the controller and signals the notification;
+  it never touches the device. The driver handles the device, then
+  `irq_ack` unmasks the line. A line with no binding stays masked.
+- **Interrupt controller**: the legacy 8259 PIC, reached through the
+  LAPIC's LINT0 in "virtual wire" mode (ExtINT). That's enough for the
+  ISA lines (COM1 = IRQ 4) and needs no ACPI tables. The IOAPIC (found
+  through ACPI's MADT) and MSI replace it when PCI devices arrive (M8).
+- **Console server = serial driver**: the root task gives it `com1` (the
+  ports 0x3f8-0x3ff and IRQ 4). It enables receive interrupts, binds its
+  notification to itself and waits in `recv` for clients and interrupts
+  alike. Output is written by polling the transmitter (a few microseconds
+  per byte at 115200 baud; instant under QEMU): an interrupt-driven
+  transmit queue only pays off for far more output than a console
+  produces. Input lines are echoed as `[console] input: ...`.
+- **Naming**: the root task registers a name for each badge
+  (`CONSOLE_SET_NAME`, accepted from badge 0 only), so every line the
+  console prints starts with `[program]`, just like the kernel's debug
+  output did.
+- **Who can print**: `debug_write` is now refused (`-ERR_PERM`) to every
+  process the root task starts; they can only print through the console.
+  `hello` checks this. The root task and the kernel's self-test processes
+  (started by the kernel itself) keep it. The root task uses it until the
+  console is up and again after shutting it down, and prints through the
+  console in between.
+- **The kernel still writes its own log to COM1**: boot messages, fault
+  reports and panics must work with no user space at all. The kernel
+  never reads the port or enables its interrupts. Kernel lines and
+  console lines can interleave between lines (not within one in
+  practice, since the console writes a line in one go at priority 200).
+  Moving the kernel log to a second port (COM2) would separate them.
+- Input typed before the kernel initializes the UART is lost (the
+  initialization clears its buffers).
+
 ## Drivers and modules
 
 - A "module" is a user-space program image (or a manifest) loaded by the
-  bootloader. The root task starts the programs (see above). From M7, the
-  console server also gets the COM1 I/O-port capability and IRQ 4.
+  bootloader. The root task starts the programs (see above).
 - **Supervision**: the root task holds a notification bound to each child's
   fault handler. On a fault it tears the server down, restarts it, and
   re-hands its caps. Clients see an IPC error and reconnect.
@@ -411,11 +472,11 @@ object types and error codes live in `include/abi/syscall.h`.
 
 | # | Call | Notes |
 |---|---|---|
-| 0 | `debug_write(buf, len) -> len` | debug only; the console server prints through it until M7 |
+| 0 | `debug_write(buf, len) -> len` | debug only; refused to processes the root task starts |
 | 1 | `exit(code)` | |
 | 2 | `yield()` | |
 | 3 | `send(ep, w0..w3, cap)` | needs WRITE (GRANT to send a cap) |
-| 4 | `recv(ep) -> msg` | needs READ |
+| 4 | `recv(ep) -> msg` | needs READ; `IPC_NOTIFIED` + bits if the bound notification fired |
 | 5 | `call(ep, w0..w3, cap) -> reply` | needs WRITE |
 | 6 | `reply(w0..w3, cap)` | to the last caller received |
 | 7 | `reply_recv(ep, w0..w3, cap) -> msg` | the server loop |
@@ -430,6 +491,10 @@ object types and error codes live in `include/abi/syscall.h`.
 | 16 | `proc_give(proc, slot, dst_slot, rights, badge)` | needs WRITE; cap_copy rules, into another table |
 | 17 | `proc_start(proc, arg)` | needs WRITE; once |
 | 18 | `proc_wait(proc) -> code` | needs READ; `-ERR_DEAD` if killed |
+| 19 | `ioport_enable(ioport)` | needs WRITE; lasts for the process's lifetime |
+| 20 | `irq_bind(irq, ntfn, bits)` | needs WRITE on both; unmasks the line |
+| 21 | `irq_ack(irq)` | needs WRITE; unmasks the line again |
+| 22 | `ntfn_bind(ntfn)` | needs READ; recv can now return `IPC_NOTIFIED` |
 | later | `map`, `unmap`, `thread_create`, `cap_revoke` | M8/M9 |
 
 ## Milestones
@@ -443,7 +508,7 @@ object types and error codes live in `include/abi/syscall.h`.
 | **M4** | Ring 3, `syscall`, root task loaded from an ELF module | root task prints via a syscall; preempted in ring 3 and resumed; a faulting process is killed and the kernel survives ✅ |
 | **M5** | Endpoints, notifications, capability tables | two processes talk only through capabilities they were given: 1000 call/reply round trips on the fast path, a capability passed in a reply, a cross-process notification; a dying server returns -ERR_DEAD to its caller ✅ |
 | **M6** | Root task spawns servers from a manifest | the root task starts a console server and a client from `system.manifest`, each holding only the capabilities its line grants; one crashing application leaves the rest running ✅ |
-| M7 | User-space serial console driver (IRQ via notification) | kernel stops printing directly |
+| **M7** | User-space serial console driver (IRQ via notification) | the console server drives COM1 with its own I/O ports and IRQ 4; programs the root task starts can only print through it; a line typed on the serial port reaches it by interrupt; a program touching the port without permission is killed ✅ |
 | M8 | PCI server + virtio-blk/AHCI driver + tiny FS server | `cat` a file from disk |
 | M9 | Fault supervision + restart | kill the disk driver, system survives |
 | M10 | virtio-net + user-space TCP/IP stack (stretch) | ping the guest |

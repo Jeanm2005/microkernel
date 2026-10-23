@@ -31,7 +31,7 @@ struct tss {
     uint64_t ist[7];      /* ist[0] is IST slot 1 */
     uint64_t reserved2;
     uint16_t reserved3;
-    uint16_t iomap_base;  /* offset of the I/O permission bitmap; >= limit means "none" */
+    uint16_t iomap_base;  /* offset of the I/O permission bitmap from the TSS start */
 } __attribute__((packed));
 
 void gdt_init(void);

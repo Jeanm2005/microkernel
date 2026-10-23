@@ -27,6 +27,8 @@ static inline long syscall6(long nr, long a[6])
     return nr;
 }
 
+/* Fill *m from the registers after a successful receive. For
+ * IPC_NOTIFIED, w[0] holds the notification's bits and the rest is 0. */
 static inline void msg_from_regs(struct msg *m, const long a[6])
 {
     for (int i = 0; i < 4; i++)
@@ -52,11 +54,12 @@ static inline long sys_send(long ep, const long w[4], long send_cap)
     return syscall6(SYS_SEND, a);
 }
 
+/* 0 = message, IPC_NOTIFIED = the bound notification fired, <0 = error. */
 static inline long sys_recv(long ep, struct msg *out)
 {
     long a[6] = { ep, 0, 0, 0, 0, 0 };
     long r = syscall6(SYS_RECV, a);
-    if (r == 0)
+    if (r >= 0)
         msg_from_regs(out, a);
     return r;
 }
@@ -68,12 +71,12 @@ static inline long sys_reply(const long w[4], long send_cap)
 }
 
 /* A server's main loop call: answer the current caller, then wait for the
- * next message. */
+ * next message. Returns like sys_recv. */
 static inline long sys_reply_recv(long ep, const long w[4], long send_cap, struct msg *out)
 {
     long a[6] = { ep, w[0], w[1], w[2], w[3], send_cap };
     long r = syscall6(SYS_REPLY_RECV, a);
-    if (r == 0)
+    if (r >= 0)
         msg_from_regs(out, a);
     return r;
 }
@@ -154,4 +157,31 @@ static inline long sys_proc_wait(long proc, long *code)
     if (r == 0)
         *code = a[0];
     return r;
+}
+
+/* Devices (drivers). */
+
+static inline long sys_ioport_enable(long ioport)
+{
+    long a[6] = { ioport, 0, 0, 0, 0, 0 };
+    return syscall6(SYS_IOPORT_ENABLE, a);
+}
+
+static inline long sys_irq_bind(long irq, long ntfn, long bits)
+{
+    long a[6] = { irq, ntfn, bits, 0, 0, 0 };
+    return syscall6(SYS_IRQ_BIND, a);
+}
+
+static inline long sys_irq_ack(long irq)
+{
+    long a[6] = { irq, 0, 0, 0, 0, 0 };
+    return syscall6(SYS_IRQ_ACK, a);
+}
+
+/* From now on, signalling ntfn also wakes this thread out of recv. */
+static inline long sys_ntfn_bind(long ntfn)
+{
+    long a[6] = { ntfn, 0, 0, 0, 0, 0 };
+    return syscall6(SYS_NTFN_BIND, a);
 }

@@ -30,7 +30,12 @@ bool ipc_selftest_run(const char *name, const struct boot_info *boot);
 
 /* The system test: the root task starts the servers and applications in a
  * manifest (system.manifest), they run, and everything is torn down. The
- * named test app-crash uses crash.manifest, where one application
- * crashes; the rest must carry on. It returns normally. */
+ * named tests run a different manifest instead: app-crash (one
+ * application crashes; the rest must carry on) and console-input (the
+ * console must receive a line typed on the serial port, by interrupt).
+ * They return normally. */
 void system_selftest_boot(const struct boot_info *boot);
 bool system_selftest_run(const char *name, const struct boot_info *boot);
+/* True if `name` is one of the named system tests, which replace the
+ * boot-time system run. */
+bool system_selftest_wanted(const char *name);

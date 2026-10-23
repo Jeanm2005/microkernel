@@ -7,7 +7,11 @@
  * into the receiver's `ipc.in`, which becomes its syscall results. If a
  * receiver is already waiting, a call switches straight to it
  * (sched_block_and_switch) without touching the run queue; that is the
- * L4 IPC fast path, and reply_recv does the same back to the caller. */
+ * L4 IPC fast path, and reply_recv does the same back to the caller.
+ *
+ * A thread may also have a bound notification. Signalling it wakes the
+ * thread out of recv (status IPC_NOTIFIED, bits in word 0), so one server
+ * thread can wait for client requests and device interrupts at once. */
 #include <arch/cpu.h>
 #include <abi/syscall.h>
 #include <kernel/cap.h>
@@ -86,7 +90,7 @@ static void block_on(struct thread *me, struct kobj *o, struct waitq *q, enum ip
 
 static uint64_t results(struct syscall_regs *r, struct thread *me)
 {
-    if (me->ipc.status == 0)
+    if (me->ipc.status >= 0)   /* a message, or IPC_NOTIFIED */
         for (int i = 0; i < 6; i++)
             r->arg[i] = me->ipc.in[i];
     return (uint64_t)me->ipc.status;
@@ -109,7 +113,28 @@ void ipc_thread_dying(struct thread *t)
 {
     uint64_t flags = irq_save();
     abandon_reply(t);
+    struct notification *n = t->ipc.bound_ntfn;
+    if (n) {
+        n->bound = NULL;
+        t->ipc.bound_ntfn = NULL;
+    }
     irq_restore(flags);
+    if (n)
+        kobj_put(&n->obj);
+}
+
+/* If our bound notification has bits pending, take them as the result of
+ * this recv. Interrupts off. */
+static bool take_bound(struct thread *me)
+{
+    struct notification *n = me->ipc.bound_ntfn;
+    if (!n || !n->word)
+        return false;
+    memset(me->ipc.in, 0, sizeof me->ipc.in);
+    me->ipc.in[0] = n->word;
+    n->word = 0;
+    me->ipc.status = IPC_NOTIFIED;
+    return true;
 }
 
 uint64_t ipc_send(struct syscall_regs *r, bool call)
@@ -157,9 +182,13 @@ uint64_t ipc_send(struct syscall_regs *r, bool call)
     return ret;
 }
 
-/* Take a message from `ep`, waiting if there is none. Interrupts off. */
+/* Take a message from `ep`, waiting if there is none. Interrupts off.
+ * Pending bound-notification bits win over waiting senders, so a busy
+ * server can't starve its own device interrupts. */
 static void do_recv(struct thread *me, struct endpoint *ep)
 {
+    if (take_bound(me))
+        return;
     struct thread *tx = waitq_pop(&ep->senders);
     if (!tx) {
         block_on(me, &ep->obj, &ep->receivers, IPC_RECV);
@@ -235,7 +264,8 @@ uint64_t ipc_reply(struct syscall_regs *r, bool then_recv)
         return 0;
     }
 
-    if (caller && waitq_empty(&ep->senders)) {
+    if (caller && waitq_empty(&ep->senders) &&
+        !(me->ipc.bound_ntfn && me->ipc.bound_ntfn->word)) {
         /* Fast path: start waiting for the next message and run the
          * caller right away. */
         block_on(me, &ep->obj, &ep->receivers, IPC_RECV);
@@ -259,20 +289,57 @@ uint64_t ipc_notify(struct syscall_regs *r)
         irq_restore(flags);
         return (uint64_t)err;
     }
-    struct notification *n = (struct notification *)c->obj;
-    n->word |= r->arg[1] | c->badge;
-    if (n->word) {
-        struct thread *t = waitq_pop(&n->waiters);
-        if (t) {
-            t->ipc.in[0] = n->word;
-            n->word = 0;
-            t->ipc.status = 0;
-            unblock_from_object(t);
-            sched_wake(t);
-        }
-    }
+    ntfn_signal((struct notification *)c->obj, r->arg[1] | c->badge);
     irq_restore(flags);
     return 0;
+}
+
+void ntfn_signal(struct notification *n, uint64_t bits)
+{
+    n->word |= bits;
+    if (!n->word)
+        return;
+
+    /* The bound thread, if it's waiting for a message right now. */
+    struct thread *b = n->bound;
+    if (b && b->state == THREAD_BLOCKED && b->ipc.op == IPC_RECV) {
+        struct endpoint *ep = (struct endpoint *)b->ipc.blocked_on;
+        waitq_remove(&ep->receivers, b);
+        memset(b->ipc.in, 0, sizeof b->ipc.in);
+        b->ipc.in[0] = n->word;
+        n->word = 0;
+        b->ipc.status = IPC_NOTIFIED;
+        unblock_from_object(b);
+        sched_wake(b);
+        return;
+    }
+
+    struct thread *t = waitq_pop(&n->waiters);
+    if (t) {
+        t->ipc.in[0] = n->word;
+        n->word = 0;
+        t->ipc.status = 0;
+        unblock_from_object(t);
+        sched_wake(t);
+    }
+}
+
+uint64_t ipc_ntfn_bind(struct syscall_regs *r)
+{
+    uint64_t flags = irq_save();
+    struct thread *me = thread_current();
+    struct cap *c;
+    int64_t err = cspace_lookup(my_cspace(), (int64_t)r->arg[0], KOBJ_NOTIFICATION, CAP_READ, &c);
+    struct notification *n = err ? NULL : (struct notification *)c->obj;
+    if (!err && (n->bound || me->ipc.bound_ntfn))
+        err = -ERR_EXIST;   /* one notification per thread and vice versa */
+    if (!err) {
+        kobj_get(&n->obj);
+        n->bound = me;
+        me->ipc.bound_ntfn = n;
+    }
+    irq_restore(flags);
+    return (uint64_t)err;
 }
 
 uint64_t ipc_wait(struct syscall_regs *r)

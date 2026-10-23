@@ -1,21 +1,28 @@
 /* Starting the system from a manifest.
  *
- * The kernel gave us a factory (ROOT_SLOT_FACTORY) and a read-only
- * capability for each boot module (from ROOT_SLOT_MODULES on). A manifest
- * is one of those modules: a text file with one program per line,
+ * The kernel gave us a factory (ROOT_SLOT_FACTORY), the COM1 serial
+ * port's I/O ports and IRQ, and a read-only capability for each boot
+ * module (from ROOT_SLOT_MODULES on). A manifest is one of those modules:
+ * a text file with one program per line,
  *
- *     # name    image         priority  provides  uses       arg
- *     console   console.elf   200       console   -          0
- *     hello     hello.elf     100       -         console    0
+ *     # name    image         priority  provides  uses     devices  arg
+ *     console   console.elf   200       console   -        com1     0
+ *     hello     hello.elf     100       -         console  -        0
  *
- * For each program we create a process from its image, give it a receive
- * capability for the service it provides (slot SLOT_SERVE) and a badged
- * send capability for each service it uses (slots SLOT_USES and up), and
- * nothing else. Then we start everything, wait for the applications (the
- * programs that provide nothing) to finish, and shut the servers down in
- * reverse order. */
+ * For each program we create a process from its image and give it a
+ * receive capability for the service it provides (slot SLOT_SERVE), a
+ * badged send capability for each service it uses (slots SLOT_USES and
+ * up), and, if it has devices, a notification for their interrupts
+ * (SLOT_EVENTS) and the devices' capabilities (SLOT_DEVICES and up).
+ * Nothing else. Then we start everything, tell the console who each badge
+ * belongs to, wait for the applications (the programs that provide
+ * nothing) to finish, and shut the servers down in reverse order.
+ *
+ * Our own output goes through the kernel's debug channel until the
+ * console is up, and through the console from then until it shuts down. */
 #include <stdbool.h>
 #include <abi/boot.h>
+#include <abi/console.h>
 #include <abi/proto.h>
 #include <abi/selftest.h>
 #include "ipc.h"
@@ -24,12 +31,25 @@
 
 #define MAX_PROGRAMS 8
 #define MAX_USES     4
+#define MAX_DEVICES  2
 #define MAX_MODULES  16
+#define FIELDS       7
+
+/* Devices the kernel gave us, and the capabilities each one consists of. */
+static const struct {
+    const char *name;
+    long        slots[2];
+} devices[] = {
+    { "com1", { ROOT_SLOT_COM1, ROOT_SLOT_COM1_IRQ } },
+};
+#define NDEVICES (int)(sizeof devices / sizeof devices[0])
 
 struct program {
     char *name, *image, *provides;   /* provides: NULL if none */
     char *uses[MAX_USES];
     int   nuses;
+    char *devs[MAX_DEVICES];
+    int   ndevs;
     long  priority, arg;
     long  proc;   /* our capability to its process */
     long  ep;     /* our (unbadged) capability to the endpoint it serves, or 0 */
@@ -44,6 +64,9 @@ static int nmodules;
 static struct program progs[MAX_PROGRAMS];
 static int nprogs;
 static char manifest[2048];
+
+/* Who holds each badge on the console's endpoint (0 = us). */
+static const char *console_names[CONSOLE_MAX_CLIENTS] = { "root" };
 
 static void find_modules(void)
 {
@@ -68,6 +91,14 @@ static struct program *provider(const char *service)
         if (progs[i].provides && strcmp(progs[i].provides, service) == 0)
             return &progs[i];
     return NULL;
+}
+
+static int device_index(const char *name)
+{
+    for (int i = 0; i < NDEVICES; i++)
+        if (strcmp(devices[i].name, name) == 0)
+            return i;
+    return -1;
 }
 
 /* ---- parsing ----------------------------------------------------------- */
@@ -106,12 +137,12 @@ static bool parse_number(const char *s, long *out)
 
 static bool parse_line(char *line, int lineno)
 {
-    char *f[6];
-    int n = split(line, " \t\r", f, 6);
+    char *f[FIELDS];
+    int n = split(line, " \t\r", f, FIELDS);
     if (n == 0 || f[0][0] == '#')
         return true;   /* blank or comment */
-    if (n != 6) {
-        printf("FAILED: manifest line %d: expected 6 fields\n", lineno);
+    if (n != FIELDS) {
+        printf("FAILED: manifest line %d: expected %d fields\n", lineno, FIELDS);
         return false;
     }
     if (nprogs == MAX_PROGRAMS) {
@@ -123,7 +154,7 @@ static bool parse_line(char *line, int lineno)
     p->image = f[1];
     p->provides = strcmp(f[3], "-") == 0 ? NULL : f[3];
     if (strlen(p->name) >= 24 || !parse_number(f[2], &p->priority) ||
-        !parse_number(f[5], &p->arg)) {
+        !parse_number(f[6], &p->arg)) {
         printf("FAILED: manifest line %d: bad name, priority or argument\n", lineno);
         return false;
     }
@@ -131,6 +162,13 @@ static bool parse_line(char *line, int lineno)
         p->nuses = split(f[4], ",,,", p->uses, MAX_USES);
         if (p->nuses > MAX_USES) {
             printf("FAILED: manifest line %d: more than %d services used\n", lineno, MAX_USES);
+            return false;
+        }
+    }
+    if (strcmp(f[5], "-") != 0) {
+        p->ndevs = split(f[5], ",,,", p->devs, MAX_DEVICES);
+        if (p->ndevs > MAX_DEVICES) {
+            printf("FAILED: manifest line %d: more than %d devices\n", lineno, MAX_DEVICES);
             return false;
         }
     }
@@ -163,6 +201,21 @@ static bool parse_manifest(char *text)
                 printf("FAILED: %s: nobody provides '%s'\n", progs[i].name, progs[i].uses[k]);
                 return false;
             }
+        }
+        /* A device has exactly one driver. */
+        for (int k = 0; k < progs[i].ndevs; k++) {
+            int d = device_index(progs[i].devs[k]);
+            if (d < 0) {
+                printf("FAILED: %s: no device '%s'\n", progs[i].name, progs[i].devs[k]);
+                return false;
+            }
+            for (int j = 0; j < i; j++)
+                for (int l = 0; l < progs[j].ndevs; l++)
+                    if (strcmp(progs[j].devs[l], progs[i].devs[k]) == 0) {
+                        printf("FAILED: %s and %s both claim '%s'\n", progs[j].name,
+                               progs[i].name, progs[i].devs[k]);
+                        return false;
+                    }
         }
     }
     return true;
@@ -198,6 +251,48 @@ static bool create(struct program *p, long *next_badge)
             return false;
         }
         printf("%s uses '%s' as client %ld\n", p->name, p->uses[k], badge);
+        if (strcmp(p->uses[k], "console") == 0 && badge < CONSOLE_MAX_CLIENTS)
+            console_names[badge] = p->name;
+    }
+    /* A driver gets a notification of its own for its interrupts, then
+     * each device's capabilities. We keep no copy of the notification. */
+    if (p->ndevs) {
+        long ntfn = sys_obj_create(ROOT_SLOT_FACTORY, OBJ_NOTIFICATION);
+        if (ntfn < 0 || sys_proc_give(p->proc, ntfn, SLOT_EVENTS, CAP_ALL, 0) ||
+            sys_cap_delete(ntfn)) {
+            printf("FAILED: giving %s a notification\n", p->name);
+            return false;
+        }
+    }
+    long slot = SLOT_DEVICES;
+    for (int k = 0; k < p->ndevs; k++) {
+        int d = device_index(p->devs[k]);
+        for (int c = 0; c < 2; c++) {
+            if (sys_proc_give(p->proc, devices[d].slots[c], slot++, CAP_ALL, 0)) {
+                printf("FAILED: giving %s device '%s'\n", p->name, p->devs[k]);
+                return false;
+            }
+        }
+        printf("%s drives '%s'\n", p->name, p->devs[k]);
+    }
+    return true;
+}
+
+/* Tell the console whose badge is whose, so every line it prints carries
+ * the name of the program that wrote it. */
+static bool name_console_clients(long ep)
+{
+    for (long b = 0; b < CONSOLE_MAX_CLIENTS; b++) {
+        if (!console_names[b])
+            continue;
+        struct msg m = { 0 };
+        m.w[0] = CONSOLE_SET_NAME | (b << 8);
+        size_t n = strlen(console_names[b]);
+        memcpy(&m.w[1], console_names[b], n < CONSOLE_NAME_MAX ? n : CONSOLE_NAME_MAX);
+        if (sys_call(ep, &m, 0) || m.w[0]) {
+            printf("FAILED: naming console client %ld\n", b);
+            return false;
+        }
     }
     return true;
 }
@@ -221,7 +316,9 @@ static void shut_down(struct program *p)
 
 int init_main(long mode)
 {
-    const char *file = mode == ROOT_MODE_INIT ? "system.manifest" : "crash.manifest";
+    const char *file = mode == ROOT_MODE_INIT_CRASH ? "crash.manifest"
+                     : mode == ROOT_MODE_INIT_INPUT ? "input.manifest"
+                     : "system.manifest";
     find_modules();
     long mod = module_slot(file);
     long size = mod ? sys_module_info(mod, 0, 0) : -1;
@@ -269,6 +366,16 @@ int init_main(long mode)
         printf("started %s (priority %ld)\n", progs[i].name, progs[i].priority);
     }
 
+    /* Our first call runs the console (it outranks the applications), and
+     * from then on our output goes through it too. */
+    struct program *console = provider("console");
+    if (console) {
+        if (!name_console_clients(console->ep))
+            return 1;
+        printf_use_console(console->ep);
+        printf("output now goes through the console server\n");
+    }
+
     for (int i = 0; i < nprogs; i++) {
         struct program *p = &progs[i];
         if (p->provides)
@@ -282,6 +389,7 @@ int init_main(long mode)
             printf("FAILED: waiting for %s: error %ld\n", p->name, r);
     }
 
+    printf_use_console(0);   /* the console is about to go away */
     for (int i = nprogs - 1; i >= 0; i--)
         if (progs[i].provides)
             shut_down(&progs[i]);

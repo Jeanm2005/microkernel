@@ -1,11 +1,13 @@
 #include <stdbool.h>
 #include <arch/backtrace.h>
 #include <arch/cpu.h>
+#include <kernel/irq.h>
 #include <kernel/kprintf.h>
 #include <kernel/panic.h>
 #include <kernel/process.h>
 #include <kernel/sched.h>
 #include "lapic.h"
+#include "pic.h"
 #include "trap.h"
 
 enum {
@@ -118,7 +120,12 @@ void trap_dispatch(struct trap_frame *tf)
          * hold back further ticks until then. */
         lapic_eoi();
         sched_timer_tick();
-    } else if (v == VEC_LAPIC_SPURIOUS || (v >= VEC_PIC_BASE && v < VEC_PIC_BASE + 16)) {
+    } else if (v >= VEC_PIC_BASE && v < VEC_PIC_BASE + 16) {
+        /* A device interrupt: masked and acknowledged at the PIC, then
+         * passed to whoever holds the capability for that line. */
+        if (pic_accept((unsigned)(v - VEC_PIC_BASE)))
+            irq_handle((unsigned)(v - VEC_PIC_BASE));
+    } else if (v == VEC_LAPIC_SPURIOUS) {
         /* Spurious interrupts need no EOI and no handling. */
     } else {
         fatal(tf, "UNEXPECTED INTERRUPT");

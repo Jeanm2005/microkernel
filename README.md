@@ -7,7 +7,7 @@ can crash and be restarted without taking the system down.
 
 See [docs/DESIGN.md](docs/DESIGN.md) for the architecture and milestones.
 
-**Status:** M6 of 10 done.
+**Status:** M7 of 10 done.
 
 - M0: boots via Limine on QEMU, serial console, memory map
 - M1: own GDT (Global Descriptor Table), TSS (Task State Segment) and IDT
@@ -25,6 +25,9 @@ See [docs/DESIGN.md](docs/DESIGN.md) for the architecture and milestones.
   limited by factory capabilities
 - M6: the root task reads a manifest and starts a console server and its
   clients, handing each exactly the capabilities its manifest line lists
+- M7: the console server is a user-space serial driver: it holds COM1's
+  I/O ports and IRQ 4 as capabilities, gets interrupts as notifications,
+  and is the only way the programs it serves can print
 
 ## Build and run
 
@@ -43,6 +46,7 @@ make run CMDLINE="selftest=stack-overflow" # a thread overflows into its guard p
 make run CMDLINE="selftest=user-pagefault" # a user process crashes; the kernel survives
 make run CMDLINE="selftest=ipc-server-dies" # a server dies mid-call; its client gets -ERR_DEAD
 make run CMDLINE="selftest=app-crash"       # one application crashes; the system carries on
+make run CMDLINE="selftest=console-input"   # type a line and press Enter: it arrives by IRQ 4
 ```
 
 The first build clones the Limine bootloader into `limine/`.

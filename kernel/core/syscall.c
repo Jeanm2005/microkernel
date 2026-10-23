@@ -3,6 +3,7 @@
 #include <abi/syscall.h>
 #include <kernel/cap.h>
 #include <kernel/ipc.h>
+#include <kernel/irq.h>
 #include <kernel/object.h>
 #include <kernel/process.h>
 #include <kernel/sched.h>
@@ -55,6 +56,11 @@ uint64_t syscall_handle(struct syscall_regs *r)
                                                          (int64_t)a[2], a[3], a[4]);
     case SYS_PROC_START:  return (uint64_t)sys_proc_start(cs, (int64_t)a[0], a[1]);
     case SYS_PROC_WAIT:   return (uint64_t)sys_proc_wait(cs, (int64_t)a[0], &a[0]);
+
+    case SYS_IOPORT_ENABLE: return (uint64_t)sys_ioport_enable(cs, (int64_t)a[0]);
+    case SYS_IRQ_BIND:    return (uint64_t)sys_irq_bind(cs, (int64_t)a[0], (int64_t)a[1], a[2]);
+    case SYS_IRQ_ACK:     return (uint64_t)sys_irq_ack(cs, (int64_t)a[0]);
+    case SYS_NTFN_BIND:   return ipc_ntfn_bind(r);
 
     default:              return (uint64_t)-ERR_NOSYS;
     }

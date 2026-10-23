@@ -17,10 +17,12 @@ enum root_mode {
     /* The real job: start the system described by a manifest. */
     ROOT_MODE_INIT        = 8,  /* system.manifest */
     ROOT_MODE_INIT_CRASH  = 9,  /* crash.manifest: one application crashes */
+    ROOT_MODE_INIT_INPUT  = 10, /* input.manifest: wait for a line of input */
 };
 
-/* Argument the hello program gets in crash.manifest: crash after printing. */
-#define HELLO_CRASH 1
+/* Arguments for the hello program (last manifest column). */
+#define HELLO_CRASH       1   /* touch the serial port directly, and get killed */
+#define HELLO_WAIT_INPUT  2   /* wait until the console has received a line */
 
 /* Capability slots the IPC tests set up before starting the programs. */
 #define TEST_SLOT_EP       1   /* server: READ|GRANT; client: WRITE|GRANT, badged */

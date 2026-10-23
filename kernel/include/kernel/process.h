@@ -4,6 +4,7 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
+#include <arch/ioport.h>
 #include <kernel/cap.h>
 #include <kernel/sched.h>
 
@@ -23,6 +24,9 @@ struct process {
     uint64_t       arg;            /* passed to the program in rdi */
 
     bool           started;        /* process_start() has run */
+    bool           may_debug_write; /* only processes the kernel itself started */
+    bool           has_io;         /* io_allowed has any bit set */
+    uint8_t        io_allowed[ARCH_IO_PORTS / 8];   /* 1 bit per port, 1 = allowed */
 
     /* Status, written once by the dying thread and read by waiters. */
     volatile bool  exited;
@@ -70,7 +74,9 @@ __attribute__((noreturn)) void process_kill_current(const char *reason);
 void process_thread_gone(struct process *p);
 
 /* SYS_DEBUG_WRITE: copy `len` bytes from user memory and print them,
- * each line prefixed with the process name. */
+ * each line prefixed with the process name. Only for processes the kernel
+ * started itself (the root task, the kernel's self-tests); everything the
+ * root task starts prints through the console server (-ERR_PERM). */
 int64_t process_debug_write(uint64_t user_buf, uint64_t len);
 
 /* Copy between the kernel and the current process's memory. Return 0, or

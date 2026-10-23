@@ -79,6 +79,7 @@ uint64_t sched_ticks(void);
 void waitq_push(struct waitq *q, struct thread *t);
 struct thread *waitq_pop(struct waitq *q);    /* NULL if empty */
 bool waitq_empty(const struct waitq *q);
+void waitq_remove(struct waitq *q, struct thread *t);   /* t must be on q */
 /* Block the current thread (the caller has already recorded where it
  * waits) and run something else; returns once someone wakes it. */
 void sched_block(void);

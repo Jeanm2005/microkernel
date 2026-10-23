@@ -13,6 +13,8 @@ set -u
 OUT="$BUILD/test"
 mkdir -p "$OUT"
 failed=0
+input=""         # set before run_case to type this on the serial port ...
+input_after=""   # ... once this text has appeared in the output
 
 # run_case NAME CMDLINE EXPECTED_STATUS EXPECTED_TEXT...
 run_case() {
@@ -21,10 +23,36 @@ run_case() {
     iso="$OUT/$name.iso" log="$OUT/$name.log"
 
     make -s iso ISO="$iso" CMDLINE="$cmdline" >/dev/null || { echo "FAIL $name (ISO build)"; failed=1; return; }
+    # QEMU's serial port reads stdin. Normally that's /dev/null (QEMU must
+    # not touch the terminal). With $input set, stdin is a named pipe, and
+    # we type into it once $input_after shows up in the log: text sent
+    # earlier could arrive before the kernel sets up the UART, which
+    # discards it.
     # shellcheck disable=SC2086  # QEMUFLAGS is meant to be split into words
-    timeout 20 $QEMU $QEMUFLAGS -cdrom "$iso" \
-        -device isa-debug-exit,iobase=0xf4,iosize=0x04 </dev/null >"$log" 2>&1
-    status=$?
+    if [ -n "$input" ]; then
+        fifo="$OUT/$name.in"
+        rm -f "$fifo" && mkfifo "$fifo"
+        : >"$log"
+        timeout 20 $QEMU $QEMUFLAGS -cdrom "$iso" \
+            -device isa-debug-exit,iobase=0xf4,iosize=0x04 <"$fifo" >"$log" 2>&1 &
+        pid=$!
+        exec 3>"$fifo"   # keep the pipe open until QEMU is done
+        tries=0
+        while ! grep -qF -- "$input_after" "$log" && [ $tries -lt 190 ]; do
+            sleep 0.1
+            tries=$((tries + 1))
+        done
+        printf '%s\n' "$input" >&3
+        wait $pid
+        status=$?
+        exec 3>&-
+        rm -f "$fifo"
+    else
+        timeout 20 $QEMU $QEMUFLAGS -cdrom "$iso" \
+            -device isa-debug-exit,iobase=0xf4,iosize=0x04 </dev/null >"$log" 2>&1
+        status=$?
+    fi
+    input="" input_after=""
 
     ok=1
     [ "$status" -eq "$want_status" ] || { echo "  exit status $status, expected $want_status"; ok=0; }
@@ -88,12 +116,15 @@ run_case boot "" 1 \
     "[root] ok: a process image must come from a module capability" \
     "[root] ok: a process that was never started can be discarded" \
     "[root] console serves 'console'" \
+    "[root] console drives 'com1'" \
     "[root] hello uses 'console' as client 1" \
     "[root] started console (priority 200)" \
-    "[console] ready" \
+    "[console] ready: driving COM1 from user space, input by IRQ 4" \
+    "[root] output now goes through the console server" \
     "[hello] ok: holds only the capabilities its manifest line lists" \
     "[hello] ok: can send to the console but not receive from it" \
-    "[console] client 1: hello from a client of the console server" \
+    "[hello] ok: printing through the kernel is refused; this line came through the console" \
+    "[hello] hello from a client of the console server" \
     "[hello] ok: the console refuses a shutdown request from a client" \
     "[root] hello exited with code 0" \
     "[console] shutting down" \
@@ -154,16 +185,29 @@ run_case ipc-server-dies "selftest=ipc-server-dies" 1 \
     "selftest: client got -ERR_DEAD when its server died; kernel survived" \
     "kernel: init complete"
 
-# One application crashes; the console and the other application carry on.
+# An application touches the serial port it doesn't own and is killed; the
+# console and the other application carry on.
 run_case app-crash "selftest=app-crash" 1 \
     "[root] read crash.manifest: 3 programs" \
-    "[console] client 1: about to crash" \
-    "process: killed 'crasher': PAGE FAULT (#PF)" \
+    "[crasher] about to write to the serial port directly" \
+    "process: killed 'crasher': GENERAL PROTECTION FAULT (#GP)" \
     "[root] crasher was killed" \
-    "[console] client 2: hello from a client of the console server" \
+    "[hello] hello from a client of the console server" \
     "[root] hello exited with code 0" \
     "[root] console shut down" \
     "selftest: an application crashed; the root task and the console carried on" \
+    "kernel: init complete"
+
+# A line typed on the serial port reaches the console server as IRQ 4,
+# while it is blocked waiting for clients.
+input="hello kernel"
+input_after="[reader] waiting for a line on the serial port"
+run_case console-input "selftest=console-input" 1 \
+    "[root] read input.manifest: 2 programs" \
+    "[console] input: hello kernel" \
+    "[reader] ok: the console received a line of input" \
+    "[console] shutting down (" \
+    "selftest: the console received input through IRQ 4" \
     "kernel: init complete"
 
 run_case unknown-selftest "selftest=nonsense" 3 \

@@ -66,6 +66,12 @@ enum syscall_nr {
 #define OBJ_FACTORY       3
 #define OBJ_MODULE        4
 #define OBJ_PROCESS       5
+#define OBJ_IOPORT        6  /* a range of I/O ports */
+#define OBJ_IRQ           7  /* one hardware interrupt line */
+
+/* Returned by SYS_RECV and SYS_REPLY_RECV when the bound notification woke the thread
+ * instead of a message. */
+#define IPC_NOTIFIED 1
 
 /* Errors (returned negated). */
 #define ERR_PERM    1    /* the capability lacks a needed right */

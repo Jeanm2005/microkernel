@@ -9,6 +9,7 @@
  * word checks no matter how many threads exist. */
 #include <arch/context.h>
 #include <arch/cpu.h>
+#include <arch/ioport.h>
 #include <arch/paging.h>
 #include <arch/percpu.h>
 #include <kernel/kprintf.h>
@@ -128,6 +129,8 @@ static void switch_to(struct thread *next)
         paging_activate(root);
         c->active_root = root;
     }
+    /* I/O ports: only a process that enabled some gets any. */
+    arch_set_io_bitmap(next->proc && next->proc->has_io ? next->proc->io_allowed : NULL);
     arch_context_switch(&prev->saved_rsp, next->saved_rsp);
 
     /* We're back: some later switch_to() switched to `prev` again. */
@@ -286,6 +289,24 @@ struct thread *waitq_pop(struct waitq *q)
 bool waitq_empty(const struct waitq *q)
 {
     return q->head == NULL;
+}
+
+void waitq_remove(struct waitq *q, struct thread *t)
+{
+    struct thread *prev = NULL;
+    for (struct thread *cur = q->head; cur; prev = cur, cur = cur->next) {
+        if (cur != t)
+            continue;
+        if (prev)
+            prev->next = t->next;
+        else
+            q->head = t->next;
+        if (q->tail == t)
+            q->tail = prev;
+        t->next = NULL;
+        return;
+    }
+    panic("waitq_remove: thread %lu is not on the queue", t->id);
 }
 
 void sched_block(void)

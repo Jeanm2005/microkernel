@@ -11,6 +11,8 @@ enum kobj_type {
     KOBJ_FACTORY = 3,
     KOBJ_MODULE = 4,
     KOBJ_PROCESS = 5,
+    KOBJ_IOPORT = 6,
+    KOBJ_IRQ = 7,
 };
 
 struct factory;
@@ -30,9 +32,10 @@ struct endpoint {
 };
 
 struct notification {
-    struct kobj  obj;
-    uint64_t     word;        /* pending bits */
-    struct waitq waiters;
+    struct kobj    obj;
+    uint64_t       word;      /* pending bits */
+    struct waitq   waiters;
+    struct thread *bound;     /* thread whose recv this can interrupt, or NULL */
 };
 
 /* The right to create kernel objects, with a budget. This replaces any
@@ -60,6 +63,22 @@ struct process_obj {
     struct process *proc;
 };
 
+/* A range of I/O ports a holder may enable for its own process. */
+struct ioport {
+    struct kobj obj;
+    uint16_t    base;
+    uint16_t    count;
+};
+
+/* One hardware interrupt line. While bound, each interrupt masks the line
+ * and signals `ntfn` with `bits`; SYS_IRQ_ACK unmasks it. */
+struct irq {
+    struct kobj          obj;
+    uint32_t             line;
+    struct notification *ntfn;   /* holds a reference, or NULL if unbound */
+    uint64_t             bits;
+};
+
 void object_init(void);
 
 /* Create an object with one reference (the caller's). `from` pays for it;
@@ -67,6 +86,9 @@ void object_init(void);
 struct kobj *kobj_create(enum kobj_type type, struct factory *from);
 struct kobj *factory_create(uint32_t budget);
 struct kobj *module_create(const char *name, const void *data, uint64_t size);
+/* Device objects; only the kernel makes these, at boot. */
+struct kobj *ioport_create(uint16_t base, uint16_t count);
+struct kobj *irq_create(uint32_t line);
 
 void kobj_get(struct kobj *o);
 void kobj_put(struct kobj *o);

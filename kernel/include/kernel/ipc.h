@@ -4,6 +4,7 @@
 #include <stdint.h>
 
 struct kobj;
+struct notification;
 struct thread;
 struct syscall_regs;
 
@@ -28,6 +29,7 @@ struct ipc_state {
     int64_t        status;       /* 0 or -ERR_*, set by whoever wakes us */
     struct thread *reply_to;     /* caller waiting for our reply, if any */
     bool           reply_grants; /* ... and whether it accepts caps */
+    struct notification *bound_ntfn; /* can interrupt our recv (holds a ref) */
 };
 
 uint64_t ipc_send(struct syscall_regs *r, bool call);
@@ -35,7 +37,14 @@ uint64_t ipc_recv(struct syscall_regs *r);
 uint64_t ipc_reply(struct syscall_regs *r, bool then_recv);
 uint64_t ipc_notify(struct syscall_regs *r);
 uint64_t ipc_wait(struct syscall_regs *r);
+uint64_t ipc_ntfn_bind(struct syscall_regs *r);
+
+/* Set `bits` in `n` and wake whoever is waiting for it: a thread in
+ * SYS_WAIT, or the bound thread blocked in recv. Interrupts off; safe to
+ * call from an interrupt handler. */
+void ntfn_signal(struct notification *n, uint64_t bits);
 
 /* The current thread is about to die: fail the call it owes a reply to,
- * so that caller gets -ERR_DEAD instead of waiting forever. */
+ * so that caller gets -ERR_DEAD instead of waiting forever, and unbind
+ * its notification. */
 void ipc_thread_dying(struct thread *t);
