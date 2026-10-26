@@ -1,20 +1,22 @@
 /* Starting the system from a manifest.
  *
- * The kernel gave us a factory (ROOT_SLOT_FACTORY), the COM1 serial
- * port's I/O ports and IRQ, and a read-only capability for each boot
+ * The kernel gave us a factory (ROOT_SLOT_FACTORY), every I/O port, the
+ * right to claim interrupt lines, and a read-only capability for each boot
  * module (from ROOT_SLOT_MODULES on). A manifest is one of those modules:
  * a text file with one program per line,
  *
- *     # name    image         priority  provides  uses     devices  arg
- *     console   console.elf   200       console   -        com1     0
- *     hello     hello.elf     100       -         console  -        0
+ *     # name   image        priority provides uses     devices quota arg
+ *     console  console.elf  200      console  -        com1    -     0
+ *     hello    hello.elf    100      -        console  -       -     0
  *
  * For each program we create a process from its image and give it a
  * receive capability for the service it provides (slot SLOT_SERVE), a
  * badged send capability for each service it uses (slots SLOT_USES and
- * up), and, if it has devices, a notification for their interrupts
- * (SLOT_EVENTS) and the devices' capabilities (SLOT_DEVICES and up).
- * Nothing else. Then we start everything, tell the console who each badge
+ * up), a factory with its quota of objects and pages (SLOT_FACTORY), and,
+ * if it has devices, a notification for their interrupts (SLOT_EVENTS)
+ * and the devices' capabilities (SLOT_DEVICES and up), which we carve out
+ * of our own: just the ports and interrupt line of that device. Nothing
+ * else. Then we start everything, tell the console who each badge
  * belongs to, wait for the applications (the programs that provide
  * nothing) to finish, and shut the servers down in reverse order.
  *
@@ -33,16 +35,13 @@
 #define MAX_USES     4
 #define MAX_DEVICES  2
 #define MAX_MODULES  16
-#define FIELDS       7
+#define FIELDS       8
 
-/* Devices the kernel gave us, and the capabilities each one consists of. */
-static const struct {
-    const char *name;
-    long        slots[2];
-} devices[] = {
-    { "com1", { ROOT_SLOT_COM1, ROOT_SLOT_COM1_IRQ } },
-};
-#define NDEVICES (int)(sizeof devices / sizeof devices[0])
+/* Devices we can hand out. Each is a few capabilities we derive from our
+ * own (see device_caps()). */
+static const char *const device_names[] = { "com1", "pci" };
+#define NDEVICES (int)(sizeof device_names / sizeof device_names[0])
+#define MAX_DEVICE_CAPS 3
 
 struct program {
     char *name, *image, *provides;   /* provides: NULL if none */
@@ -50,6 +49,7 @@ struct program {
     int   nuses;
     char *devs[MAX_DEVICES];
     int   ndevs;
+    long  quota_objects, quota_pages;   /* both 0: no factory */
     long  priority, arg;
     long  proc;   /* our capability to its process */
     long  ep;     /* our (unbadged) capability to the endpoint it serves, or 0 */
@@ -96,10 +96,33 @@ static struct program *provider(const char *service)
 static int device_index(const char *name)
 {
     for (int i = 0; i < NDEVICES; i++)
-        if (strcmp(devices[i].name, name) == 0)
+        if (strcmp(device_names[i], name) == 0)
             return i;
     return -1;
 }
+
+/* Make the capabilities that make up device `name`, in our own table, in
+ * the order the driver gets them. Returns how many, or -1. */
+static int device_caps(const char *name, long caps[MAX_DEVICE_CAPS])
+{
+    int n = 0;
+    if (strcmp(name, "com1") == 0) {
+        caps[n++] = sys_ioport_sub(ROOT_SLOT_FACTORY, ROOT_SLOT_IOPORTS, 0x3f8, 8);
+        caps[n++] = sys_irq_get(ROOT_SLOT_FACTORY, ROOT_SLOT_IRQ_CONTROL, 4);
+    } else if (strcmp(name, "pci") == 0) {
+        /* Configuration space through the legacy port pair 0xcf8/0xcfc,
+         * the range where firmware puts devices' I/O registers, and the
+         * right to claim the devices' interrupt lines. */
+        caps[n++] = sys_ioport_sub(ROOT_SLOT_FACTORY, ROOT_SLOT_IOPORTS, 0xcf8, 8);
+        caps[n++] = sys_ioport_sub(ROOT_SLOT_FACTORY, ROOT_SLOT_IOPORTS, 0x1000, 0xf000);
+        caps[n++] = ROOT_SLOT_IRQ_CONTROL;
+    }
+    for (int i = 0; i < n; i++)
+        if (caps[i] <= 0)
+            return -1;
+    return n;
+}
+
 
 /* ---- parsing ----------------------------------------------------------- */
 
@@ -135,6 +158,14 @@ static bool parse_number(const char *s, long *out)
     return true;
 }
 
+static bool parse_quota(char *s, long *objects, long *pages)
+{
+    char *part[2];
+    if (split(s, "///", part, 2) != 2)
+        return false;
+    return parse_number(part[0], objects) && parse_number(part[1], pages);
+}
+
 static bool parse_line(char *line, int lineno)
 {
     char *f[FIELDS];
@@ -154,7 +185,7 @@ static bool parse_line(char *line, int lineno)
     p->image = f[1];
     p->provides = strcmp(f[3], "-") == 0 ? NULL : f[3];
     if (strlen(p->name) >= 24 || !parse_number(f[2], &p->priority) ||
-        !parse_number(f[6], &p->arg)) {
+        !parse_number(f[7], &p->arg)) {
         printf("FAILED: manifest line %d: bad name, priority or argument\n", lineno);
         return false;
     }
@@ -171,6 +202,10 @@ static bool parse_line(char *line, int lineno)
             printf("FAILED: manifest line %d: more than %d devices\n", lineno, MAX_DEVICES);
             return false;
         }
+    }
+    if (strcmp(f[6], "-") != 0 && !parse_quota(f[6], &p->quota_objects, &p->quota_pages)) {
+        printf("FAILED: manifest line %d: quota must be objects/pages\n", lineno);
+        return false;
     }
     return true;
 }
@@ -254,6 +289,16 @@ static bool create(struct program *p, long *next_badge)
         if (strcmp(p->uses[k], "console") == 0 && badge < CONSOLE_MAX_CLIENTS)
             console_names[badge] = p->name;
     }
+    /* Its own factory, carved out of ours. */
+    if (p->quota_objects || p->quota_pages) {
+        long f = sys_factory_split(ROOT_SLOT_FACTORY, p->quota_objects, p->quota_pages);
+        if (f < 0 || sys_proc_give(p->proc, f, SLOT_FACTORY, CAP_ALL, 0) || sys_cap_delete(f)) {
+            printf("FAILED: giving %s its quota\n", p->name);
+            return false;
+        }
+        printf("%s gets a quota of %ld objects and %ld pages\n", p->name, p->quota_objects,
+               p->quota_pages);
+    }
     /* A driver gets a notification of its own for its interrupts, then
      * each device's capabilities. We keep no copy of the notification. */
     if (p->ndevs) {
@@ -264,14 +309,18 @@ static bool create(struct program *p, long *next_badge)
             return false;
         }
     }
+    /* Each device's capabilities. We keep our copies: a restarted driver
+     * (M9) will need them again. */
     long slot = SLOT_DEVICES;
     for (int k = 0; k < p->ndevs; k++) {
-        int d = device_index(p->devs[k]);
-        for (int c = 0; c < 2; c++) {
-            if (sys_proc_give(p->proc, devices[d].slots[c], slot++, CAP_ALL, 0)) {
-                printf("FAILED: giving %s device '%s'\n", p->name, p->devs[k]);
-                return false;
-            }
+        long caps[MAX_DEVICE_CAPS];
+        int n = device_caps(p->devs[k], caps);
+        for (int c = 0; c < n; c++)
+            if (sys_proc_give(p->proc, caps[c], slot++, CAP_ALL, 0))
+                n = -1;
+        if (n < 0) {
+            printf("FAILED: giving %s device '%s'\n", p->name, p->devs[k]);
+            return false;
         }
         printf("%s drives '%s'\n", p->name, p->devs[k]);
     }

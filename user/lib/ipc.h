@@ -185,3 +185,53 @@ static inline long sys_ntfn_bind(long ntfn)
     long a[6] = { ntfn, 0, 0, 0, 0, 0 };
     return syscall6(SYS_NTFN_BIND, a);
 }
+
+/* Memory. */
+
+static inline long sys_frame_alloc(long factory, long pages)
+{
+    long a[6] = { factory, pages, 0, 0, 0, 0 };
+    return syscall6(SYS_FRAME_ALLOC, a);
+}
+
+/* Physical address (for DMA), or -ERR_*; *pages gets the size. */
+static inline long sys_frame_info(long frame, long *pages)
+{
+    long a[6] = { frame, 0, 0, 0, 0, 0 };
+    long r = syscall6(SYS_FRAME_INFO, a);
+    if (r >= 0)
+        *pages = a[0];
+    return r;
+}
+
+static inline long sys_map(long frame, unsigned long vaddr, long writable)
+{
+    long a[6] = { frame, (long)vaddr, writable, 0, 0, 0 };
+    return syscall6(SYS_MAP, a);
+}
+
+static inline long sys_unmap(unsigned long vaddr)
+{
+    long a[6] = { (long)vaddr, 0, 0, 0, 0, 0 };
+    return syscall6(SYS_UNMAP, a);
+}
+
+/* Handing out parts of what we hold. */
+
+static inline long sys_factory_split(long factory, long objects, long pages)
+{
+    long a[6] = { factory, objects, pages, 0, 0, 0 };
+    return syscall6(SYS_FACTORY_SPLIT, a);
+}
+
+static inline long sys_ioport_sub(long factory, long ioport, long base, long count)
+{
+    long a[6] = { factory, ioport, base, count, 0, 0 };
+    return syscall6(SYS_IOPORT_SUB, a);
+}
+
+static inline long sys_irq_get(long factory, long irq_control, long line)
+{
+    long a[6] = { factory, irq_control, line, 0, 0, 0 };
+    return syscall6(SYS_IRQ_GET, a);
+}

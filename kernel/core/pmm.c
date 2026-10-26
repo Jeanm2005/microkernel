@@ -1,10 +1,14 @@
 /* Physical memory manager: one bit per 4 KiB frame (1 = in use).
  *
  * Simple and good enough for now: allocation scans for a zero bit starting
- * where the last search stopped, 64 frames per step. A buddy allocator
- * would be needed for multi-frame contiguous allocations (DMA buffers);
- * we'll add one when a driver needs it. */
+ * where the last search stopped, 64 frames per step. Physically contiguous
+ * runs (for DMA buffers) are found by a linear scan for enough consecutive
+ * zero bits; a buddy allocator would make that faster if it ever matters.
+ *
+ * Every function runs with interrupts off: system calls are preemptible,
+ * so two threads could otherwise be inside the allocator at once. */
 #include <stdbool.h>
+#include <arch/cpu.h>
 #include <kernel/kprintf.h>
 #include <kernel/mm.h>
 #include <kernel/panic.h>
@@ -106,7 +110,7 @@ void pmm_reclaim_bootloader(const struct boot_info *boot)
             ((free_frames - before) * PAGE_SIZE) / 1024, (free_frames * PAGE_SIZE) >> 20);
 }
 
-uint64_t pmm_alloc(void)
+static uint64_t alloc_locked(void)
 {
     for (uint64_t n = 0; n < bitmap_words; n++) {
         uint64_t w = (next_word + n) % bitmap_words;
@@ -119,6 +123,36 @@ uint64_t pmm_alloc(void)
             return frame * PAGE_SIZE;
         }
     }
+    return PMM_NONE;
+}
+
+uint64_t pmm_alloc(void)
+{
+    uint64_t flags = irq_save();
+    uint64_t f = alloc_locked();
+    irq_restore(flags);
+    return f;
+}
+
+uint64_t pmm_alloc_contig(uint64_t pages)
+{
+    if (pages == 0)
+        return PMM_NONE;
+    uint64_t flags = irq_save();
+    uint64_t run = 0;
+    for (uint64_t f = 1; f < total_frames; f++) {   /* frame 0 is never handed out */
+        run = test_bit(f) ? 0 : run + 1;
+        if (run == pages) {
+            uint64_t first = f + 1 - pages;
+            for (uint64_t i = first; i <= f; i++)
+                set_bit(i);
+            free_frames -= pages;
+            irq_restore(flags);
+            memset(phys_to_virt(first * PAGE_SIZE), 0, pages * PAGE_SIZE);
+            return first * PAGE_SIZE;
+        }
+    }
+    irq_restore(flags);
     return PMM_NONE;
 }
 
@@ -135,10 +169,18 @@ void pmm_free(uint64_t frame)
     kassert(IS_ALIGNED(frame, PAGE_SIZE));
     uint64_t f = frame / PAGE_SIZE;
     kassert(f != 0 && f < total_frames);
+    uint64_t flags = irq_save();
     if (!test_bit(f))
         panic("pmm: double free of frame %p", (void *)frame);
     clear_bit(f);
     free_frames++;
+    irq_restore(flags);
+}
+
+void pmm_free_contig(uint64_t frame, uint64_t pages)
+{
+    for (uint64_t i = 0; i < pages; i++)
+        pmm_free(frame + i * PAGE_SIZE);
 }
 
 uint64_t pmm_free_frames(void) { return free_frames; }

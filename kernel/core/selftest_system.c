@@ -1,7 +1,7 @@
 /* Starting the system: the kernel's last job at boot.
  *
- * The kernel loads the root task and gives it a factory, the COM1 serial
- * port's I/O ports and interrupt line, and one read-only capability per
+ * The kernel loads the root task and gives it a factory, every I/O port,
+ * the right to claim interrupt lines, and one read-only capability per
  * boot module. Everything after that (which servers run,
  * at what priority, holding which capabilities) is the root task's
  * decision, read from a manifest. For now the demo system runs to
@@ -10,6 +10,7 @@
 #include <abi/boot.h>
 #include <abi/selftest.h>
 #include <abi/syscall.h>
+#include <arch/ioport.h>
 #include <kernel/irq.h>
 #include <kernel/kprintf.h>
 #include <kernel/mm.h>
@@ -20,9 +21,10 @@
 #include <kernel/selftest.h>
 #include <kernel/string.h>
 
-/* How many kernel objects (endpoints, notifications, processes) the root
- * task and everything it starts may create in total. */
-#define ROOT_FACTORY_BUDGET 32
+/* What the root task and everything it starts may create in total:
+ * kernel objects (endpoints, processes, ...) and pages of RAM for frames. */
+#define ROOT_FACTORY_OBJECTS 64
+#define ROOT_FACTORY_PAGES   512   /* 2 MiB */
 
 static void give(struct process *p, struct kobj *o, uint32_t rights, int64_t want_slot)
 {
@@ -44,9 +46,10 @@ static struct process *run_system(const struct boot_info *boot, uint64_t mode)
     if (!root)
         panic("could not create the root task");
 
-    give(root, factory_create(ROOT_FACTORY_BUDGET), CAP_ALL, ROOT_SLOT_FACTORY);
-    give(root, ioport_create(0x3f8, 8), CAP_ALL, ROOT_SLOT_COM1);
-    give(root, irq_create(4), CAP_ALL, ROOT_SLOT_COM1_IRQ);
+    give(root, factory_create(ROOT_FACTORY_OBJECTS, ROOT_FACTORY_PAGES), CAP_ALL,
+         ROOT_SLOT_FACTORY);
+    give(root, ioport_create(0, ARCH_IO_PORTS, NULL), CAP_ALL, ROOT_SLOT_IOPORTS);
+    give(root, irq_control_create(), CAP_ALL, ROOT_SLOT_IRQ_CONTROL);
     for (size_t i = 0; i < boot->module_count; i++) {
         const struct boot_module *m = &boot->modules[i];
         give(root, module_create(m->name, phys_to_virt(m->phys), m->size), CAP_READ,

@@ -7,7 +7,7 @@ can crash and be restarted without taking the system down.
 
 See [docs/DESIGN.md](docs/DESIGN.md) for the architecture and milestones.
 
-**Status:** M7 of 10 done.
+**Status:** M7 of 10 done, M8 half done.
 
 - M0: boots via Limine on QEMU, serial console, memory map
 - M1: own GDT (Global Descriptor Table), TSS (Task State Segment) and IDT
@@ -28,6 +28,10 @@ See [docs/DESIGN.md](docs/DESIGN.md) for the architecture and milestones.
 - M7: the console server is a user-space serial driver: it holds COM1's
   I/O ports and IRQ 4 as capabilities, gets interrupts as notifications,
   and is the only way the programs it serves can print
+- M8 (first part): memory capabilities (frames a process maps into its
+  own address space, with per-program quotas) and a user-space PCI server
+  that hands each driver only its own device's ports and interrupt line;
+  a virtio disk driver finds the disk and reads its size
 
 ## Build and run
 

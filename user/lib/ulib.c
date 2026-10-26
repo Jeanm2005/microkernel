@@ -59,7 +59,8 @@ static void put(struct out *o, char c)
         o->buf[o->len++] = c;
 }
 
-static void put_uint(struct out *o, uint64_t v, unsigned base)
+/* `width` digits at least, padded with `pad` ('0' or ' '). */
+static void put_uint(struct out *o, uint64_t v, unsigned base, int width, char pad)
 {
     char tmp[24];
     int i = 0;
@@ -67,6 +68,8 @@ static void put_uint(struct out *o, uint64_t v, unsigned base)
         tmp[i++] = "0123456789abcdef"[v % base];
         v /= base;
     } while (v);
+    for (int n = i; n < width; n++)
+        put(o, pad);
     while (i)
         put(o, tmp[--i]);
 }
@@ -80,6 +83,14 @@ int vsnprintf(char *buf, size_t size, const char *fmt, va_list ap)
             continue;
         }
         fmt++;
+        char pad = ' ';
+        int width = 0;
+        if (*fmt == '0') {
+            pad = '0';
+            fmt++;
+        }
+        while (*fmt >= '0' && *fmt <= '9')
+            width = width * 10 + (*fmt++ - '0');
         bool lng = false;
         if (*fmt == 'l') {
             lng = true;
@@ -101,19 +112,19 @@ int vsnprintf(char *buf, size_t size, const char *fmt, va_list ap)
                 put(&o, '-');
                 v = -v;
             }
-            put_uint(&o, (uint64_t)v, 10);
+            put_uint(&o, (uint64_t)v, 10, width, pad);
             break;
         }
         case 'u':
-            put_uint(&o, lng ? va_arg(ap, uint64_t) : va_arg(ap, unsigned), 10);
+            put_uint(&o, lng ? va_arg(ap, uint64_t) : va_arg(ap, unsigned), 10, width, pad);
             break;
         case 'x':
-            put_uint(&o, lng ? va_arg(ap, uint64_t) : va_arg(ap, unsigned), 16);
+            put_uint(&o, lng ? va_arg(ap, uint64_t) : va_arg(ap, unsigned), 16, width, pad);
             break;
         case 'p':
             put(&o, '0');
             put(&o, 'x');
-            put_uint(&o, (uint64_t)va_arg(ap, void *), 16);
+            put_uint(&o, (uint64_t)va_arg(ap, void *), 16, 0, ' ');
             break;
         case '%':
             put(&o, '%');

@@ -130,7 +130,10 @@ static void switch_to(struct thread *next)
         c->active_root = root;
     }
     /* I/O ports: only a process that enabled some gets any. */
-    arch_set_io_bitmap(next->proc && next->proc->has_io ? next->proc->io_allowed : NULL);
+    if (next->proc && next->proc->io_allowed)
+        arch_set_io_bitmap(next->proc->io_allowed, next->proc->io_lo, next->proc->io_hi);
+    else
+        arch_set_io_bitmap(NULL, 0, 0);
     arch_context_switch(&prev->saved_rsp, next->saved_rsp);
 
     /* We're back: some later switch_to() switched to `prev` again. */

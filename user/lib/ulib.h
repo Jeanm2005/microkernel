@@ -9,7 +9,8 @@ void *memset(void *dst, int c, size_t n);
 void *memcpy(void *restrict dst, const void *restrict src, size_t n);
 int strcmp(const char *a, const char *b);
 
-/* Format subset: %c %s %d %u %x %p %%, with an optional `l`. Output that
+/* Format subset: %c %s %d %u %x %p %%, with an optional `l` and, for
+ * numbers, a width with optional zero padding (%08x). Output that
  * doesn't fit is cut off; the result is always NUL-terminated. Returns
  * the length written. */
 int vsnprintf(char *buf, size_t size, const char *fmt, va_list ap);

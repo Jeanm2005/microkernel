@@ -6,10 +6,17 @@
 #   provides  service it serves on the endpoint in its slot 1, or -
 #   uses      services it may call, comma-separated, or -; they land in
 #             slots 2, 3, ... in this order, each with its own badge
-#   devices   hardware it drives (com1), or -; it gets a notification in
-#             slot 8 and each device's capabilities from slot 9 on
+#   devices   hardware it drives (com1, pci), or -; it gets a notification
+#             in slot 8 and each device's capabilities from slot 9 on
+#   quota     objects/pages it may create (a factory in slot 7), or -
 #   arg       number passed to main()
 #
-# name      image         priority  provides  uses      devices  arg
-console     console.elf   200       console   -         com1     0
-hello       hello.elf     100       -         console   -        0
+# blk uses pci twice: two capabilities with different badges, which look
+# like two separate clients to the PCI server (it checks that the second
+# one can't take the device the first one claimed).
+#
+# name      image         priority  provides  uses              devices  quota  arg
+console     console.elf   200       console   -                 com1     -      0
+pci         pci.elf       180       pci       console           pci      16/0   0
+blk         blk.elf       150       -         console,pci,pci   -        4/8    0
+hello       hello.elf     100       -         console           -        -      0

@@ -37,8 +37,8 @@ be restarted by a supervisor, and the rest of the system keeps running.**
    reached only through a capability.
 6. **Interrupt routing**: a device interrupt → notification to the driver
    thread that holds the IRQ (interrupt request line) capability. Legacy
-   lines go through the 8259 PIC today; the IOAPIC (I/O APIC) and MSI come
-   with PCI devices (M8).
+   lines go through the 8259 PIC today (PCI devices' legacy INTx lines
+   too); the IOAPIC (I/O APIC) and MSI come later.
 
 Not in the kernel: device drivers (except the timer the scheduler needs and
 a write-only serial log for the kernel's own messages), file systems,
@@ -68,7 +68,7 @@ kernel/
                   lapic.h) live here
   core/           portable kernel logic (main, panic, cmdline, pmm, slab,
                   kstack, sched, process, elf, syscall, object, cap, ipc,
-                  spawn, irq, self-tests)
+                  spawn, irq, memory, self-tests)
   lib/            freestanding libc pieces (string, kprintf)
   include/arch/   interface core/ uses to reach arch code (incl. irq.h and
                   ioport.h: interrupt lines and I/O-port permissions)
@@ -76,14 +76,16 @@ kernel/
   linker.ld
 include/abi/      what the kernel and user programs share: syscall numbers,
                   rights, error codes, initial capability slots (boot.h),
-                  server protocols (proto.h, console.h), test protocol
-                  (no kernel internals)
+                  server protocols (proto.h, console.h, pci.h), test
+                  protocol (no kernel internals)
 user/
   lib/            user runtime: crt0 (_start), syscall and IPC wrappers,
                   printf/snprintf, console client, port I/O (io.h)
   root/           the root task: starts the system from a manifest (init.c);
                   also runs the kernel's user-mode and IPC tests
   console/        the console server: the COM1 serial driver
+  pci/            the PCI server
+  blk/            the virtio-blk driver (so far: finds and probes the disk)
   hello/          a console client
   *.manifest      which programs the root task starts, and with what
   linker.ld       user programs load at 0x400000
@@ -91,6 +93,9 @@ scripts/test.sh   boot-and-check test runner (`make test`)
 docs/DESIGN.md
 limine.conf       loads the user programs and manifests as boot modules
 ```
+
+`make` also creates `build/disk.img`, the disk QEMU attaches as a virtio
+block device.
 
 Rule: `core/` never includes `<limine.h>` or uses inline asm; it goes through
 `include/arch/`. Boot data (memory map, command line) is copied into
@@ -182,16 +187,22 @@ UART, which discards it.
   4 KiB frame and a next-fit search. Frame 0 is never handed out, so 0 means
   "no memory". Bootloader-reclaimable memory (Limine's page tables, stack
   and boot data) is handed to the PMM once the kernel runs on its own
-  stacks, at the start of the init thread. A buddy allocator comes later
-  if a driver needs physically contiguous buffers.
+  stacks, at the start of the init thread. Physically contiguous runs
+  (DMA buffers, since M8) are found by a linear scan of the bitmap; a buddy
+  allocator would make that faster if it ever matters.
+- **Allocator locking**: the PMM and the slab caches run with interrupts
+  off. System calls are preemptible, so before M8 two threads could in
+  principle be inside an allocator at once; nothing triggered it, but
+  M8's user-driven allocations made it worth closing.
 - **Kernel objects**: slab caches, one per object type (thread, endpoint,
   capability table). One slab = one 4 KiB page with a header at the start,
   so freeing finds the slab by rounding down. Free objects carry a magic
   word, which catches double frees. Empty slabs go straight back to the
   PMM. There is no general-purpose `kmalloc`, so user requests can never
   make the kernel allocate odd-sized blocks.
-- **User memory**: granted as frame capabilities and mapped with `map()`.
-  No `mmap` or demand paging in the kernel; a user-space pager can add that.
+- **User memory** (since M8): granted as frame capabilities and mapped
+  with `map` (see Memory and PCI below). No `mmap` or demand paging in the
+  kernel; a user-space pager can add that.
 - Device memory (LAPIC, IOAPIC, HPET) is not in the HHDM; whoever needs it
   maps it uncached (`PAGE_UNCACHED`).
 
@@ -200,9 +211,9 @@ UART, which discards it.
 - **Tick**: the LAPIC timer in periodic mode at 100 Hz (`SCHED_HZ`),
   calibrated at boot against PIT (programmable interval timer) channel 2,
   polled through port 0x61 so no interrupt is needed for calibration. The
-  legacy 8259 PIC is remapped to vectors 0x20–0x2f and fully masked; its
-  spurious interrupts are ignored. Timer = vector 0x30, LAPIC spurious =
-  0xff.
+  legacy 8259 PIC is remapped to vectors 0x20–0x2f and fully masked (until
+  M7 unmasks lines for drivers); its spurious interrupts are ignored.
+  Timer = vector 0x30, LAPIC spurious = 0xff.
 - **Threads**: `struct thread` comes from a slab cache. Each thread has a
   16 KiB kernel stack in a dedicated region (PML4 slot 510), one 32 KiB
   slot per stack: 16 KiB unmapped guard below 16 KiB of stack. An overflow
@@ -342,13 +353,17 @@ UART, which discards it.
 - **Objects** (`struct kobj`) are reference-counted: each capability and
   each thread blocked on the object holds one; the last `kobj_put` frees
   it. Types so far: endpoint, notification, factory, module and process
-  (since M6), I/O-port range and IRQ line (since M7).
+  (since M6), I/O-port range and IRQ line (since M7), frame and IRQ
+  control (since M8).
 - **Factories** replace seL4's untyped memory with something simpler:
   creating a kernel object requires a factory capability, and each factory
   has a budget. Freeing an object refunds its factory (which stays alive
   until all its objects are gone). So there is no ambient authority to
   consume kernel memory: a process can only create as many objects as the
   factory it was given allows. The tests give a factory to the server only.
+  Since M8 a factory also has a page budget for frames, and can be split:
+  `factory_split` carves a smaller factory out of a bigger one, and the
+  budget goes back when the smaller one is freed.
 - **Not yet**: revocation (deleting every capability derived from one).
   It needs a derivation tree per object; it comes with supervision in M9,
   where the supervisor must be able to take capabilities back.
@@ -357,22 +372,25 @@ UART, which discards it.
 
 - **What the kernel hands over**: the root task is the only process the
   kernel creates by itself. It starts at priority 250 with a factory
-  (slot 1, budget 32 objects), COM1's I/O ports and IRQ (slots 2 and 3,
-  since M7) and one read-only capability per boot module (slots 4 and up,
-  in load order). That is all the authority in the system; everything
-  else is derived from it (`include/abi/boot.h`).
+  (slot 1: 64 objects and 512 pages), every I/O port (slot 2), the IRQ
+  control capability (slot 3) and one read-only capability per boot
+  module (slots 4 and up, in load order). That is all the authority in the
+  system; everything else is derived from it (`include/abi/boot.h`).
 - **Manifest**: a text file loaded as a boot module, one program per line:
   name, image (a module), priority, the service it provides (or `-`), the
   services it uses (comma-separated, or `-`), the devices it drives (or
-  `-`; since M7), and an argument for `main`. The root task reads it with
-  `module_read`.
+  `-`; since M7), its quota as `objects/pages` (or `-`; since M8), and an
+  argument for `main`. The root task reads it with `module_read`.
 - **What each program gets**: a server gets a receive capability
   (READ|GRANT) for its own endpoint in slot 1; a client gets a send
   capability (WRITE|GRANT) for each service it uses, in slots 2, 3, ... in
-  the order listed, each with a badge unique to that client; a driver gets
-  a notification in slot 8 and its devices' capabilities from slot 9.
+  the order listed, each with a badge unique to that client; a program
+  with a quota gets its own factory in slot 7; a driver gets a
+  notification in slot 8 and its devices' capabilities from slot 9.
   Nothing else. `hello` checks every one of its 63 slots to prove it. A
-  device can be given to only one program.
+  device can be given to only one program. Device capabilities are carved
+  out of the root task's own: `com1` is ports 0x3f8-0x3ff plus IRQ 4;
+  `pci` is ports 0xcf8-0xcff, ports 0x1000-0xffff and IRQ control.
 - **Order**: the root task first creates an endpoint per service, then the
   processes (handing out capabilities before any of them runs), then
   starts them all. Everything runs below the root task's priority, so
@@ -399,8 +417,8 @@ UART, which discards it.
     space yet. In seL4 the root task does this itself from untyped memory
     and frame capabilities; here that waits for `map`/`unmap`.
   - A process costs one unit of factory budget, the same as an endpoint,
-    although it uses far more memory (page tables, stack, image). Budgets
-    count objects, not bytes.
+    although it uses far more memory (page tables, stack, image). Object
+    budgets count objects, not bytes; only frames are charged by the page.
   - Servers are started by the root task, not restarted: supervision is
     M9.
 
@@ -409,12 +427,20 @@ UART, which discards it.
 - **I/O ports**: an I/O-port capability names a range of ports.
   `ioport_enable` sets those bits in the process's permission bitmap; on
   every context switch the scheduler copies that bitmap into the TSS I/O
-  permission bitmap (128 bytes, ports 0-1023; processes without ports get
-  all-ones), and the CPU checks every `in`/`out` in ring 3 against it. A
-  port outside the bitmap is a #GP and the process is killed
+  permission bitmap, and the CPU checks every `in`/`out` in ring 3 against
+  it. A refused port is a #GP and the process is killed
   (`selftest=app-crash` does exactly that). The permission stays with the
   process for its lifetime: deleting the capability doesn't revoke it
-  (revocation is M9).
+  (revocation is M9). Since M8 the bitmap covers all 65536 ports (8 KiB,
+  allocated only for processes that enable a port); each process records
+  which bytes of it are in use, so a switch rewrites only those (one byte
+  for COM1, 16 for a virtio disk) instead of 8 KiB. `ioport_sub` makes a
+  capability for part of a range, which is how the root task and the PCI
+  server hand out exactly one device's ports.
+- **Interrupt lines** are claimed from the IRQ control capability
+  (`irq_get`, since M8), once each: while any copy of the resulting IRQ
+  capability exists, nobody else can claim that line. Lines 0 (the old
+  PIT timer) and 2 (the PIC cascade) can't be claimed.
 - **Interrupts**: an IRQ capability names one line. `irq_bind` connects
   it to a notification and unmasks the line. When it fires, the kernel
   masks it, acknowledges the controller and signals the notification;
@@ -422,8 +448,10 @@ UART, which discards it.
   `irq_ack` unmasks the line. A line with no binding stays masked.
 - **Interrupt controller**: the legacy 8259 PIC, reached through the
   LAPIC's LINT0 in "virtual wire" mode (ExtINT). That's enough for the
-  ISA lines (COM1 = IRQ 4) and needs no ACPI tables. The IOAPIC (found
-  through ACPI's MADT) and MSI replace it when PCI devices arrive (M8).
+  ISA lines (COM1 = IRQ 4) and for PCI devices' legacy INTx lines, which
+  the firmware routes to PIC lines (the disk gets IRQ 11), and it needs no
+  ACPI tables. The IOAPIC (found through ACPI's MADT) and MSI replace it
+  later.
 - **Console server = serial driver**: the root task gives it `com1` (the
   ports 0x3f8-0x3ff and IRQ 4). It enables receive interrupts, binds its
   notification to itself and waits in `recv` for clients and interrupts
@@ -450,6 +478,54 @@ UART, which discards it.
 - Input typed before the kernel initializes the UART is lost (the
   initialization clears its buffers).
 
+## Memory and PCI (M8, first part)
+
+- **Frames**: `frame_alloc` makes a frame of 1-64 physically contiguous,
+  zeroed pages, charged to a factory's page budget. `map` puts it at a
+  page-aligned address in the caller's own address space (between 4 GiB
+  and 0x7f00_0000_0000, so it can't collide with the program or the
+  stack), writable only if the capability has WRITE, never executable.
+  `unmap` undoes it. Each mapping holds a reference to the frame, so the
+  memory lives until the last mapping and the last capability are gone. A
+  process can have 16 mappings; they're undone when it dies, before its
+  own pages are freed. A frame capability can be sent to another process,
+  which maps the same memory: shared memory.
+- **Physical addresses**: `frame_info` tells the holder where the frame is
+  in physical memory, because a device doing DMA (direct memory access)
+  needs that. Without an IOMMU (I/O memory management unit) a driver that
+  can program DMA can reach any memory anyway, so it is trusted with the
+  whole machine whatever the kernel does; an IOMMU is a non-goal for now.
+- **Quotas**: the manifest's quota column gives a program its own factory
+  (`factory_split` of the root task's), so a driver's DMA buffers and
+  notifications come out of its own budget, not everyone's.
+- **PCI server**: owns configuration space (through the legacy port pair
+  0xcf8/0xcfc), the I/O range 0x1000-0xffff where firmware puts devices'
+  registers, and IRQ control. At start it scans all 256 buses and prints
+  every function. A driver finds its device (`PCI_FIND` by vendor and
+  device ID), claims it (`PCI_CLAIM`, one client per device; turns on I/O
+  decoding and bus mastering), then gets each resource as a capability in
+  a reply: `PCI_BAR` returns a capability for exactly that BAR's ports,
+  `PCI_IRQ` one for the device's interrupt line. A second client gets
+  `-ERR_EXIST` / `-ERR_PERM`; `blk` checks both, using a second badge.
+- **The disk**: QEMU attaches a 1 MiB raw image as a virtio-blk device in
+  transitional mode (`disable-legacy=off`), so it offers the legacy virtio
+  interface (registers in an I/O BAR) next to the modern one. `blk`
+  claims it, gets ports 0xc000-0xc07f and IRQ 11 (as routed by the
+  firmware), enables the ports, and reads the capacity register: 2048
+  sectors. Reading and writing blocks is the second part of M8.
+- **Known compromises**:
+  - Configuration access uses the legacy ports, which reach the first 256
+    bytes of each function's configuration space. ECAM (the
+    memory-mapped mechanism, 4 KiB per function) needs ACPI's MCFG table
+    and device-memory mapping; nothing needs it yet.
+  - Only I/O-port BARs are handed out. Memory-mapped BARs (which modern
+    virtio and most real devices use) need device-memory capabilities
+    with uncached mappings.
+  - Legacy interrupts only (INTx, routed by the firmware to a PIC line).
+    MSI needs the IOAPIC/LAPIC path and is deferred with it.
+  - A claim lasts until the PCI server exits; a driver that dies doesn't
+    release its device yet (that's part of M9's restart story).
+
 ## Drivers and modules
 
 - A "module" is a user-space program image (or a manifest) loaded by the
@@ -460,8 +536,8 @@ UART, which discards it.
 - **Interfaces**: each server's message protocol is a versioned header in
   `include/abi/` shared by server and clients (`proto.h` for the common
   rules, `console.h`, ...). No IDL until hand-written protocols hurt.
-- **PCI**: a user-space PCI server owns ECAM, enumerates devices and hands
-  out per-device config/BAR/MSI caps to drivers.
+- **PCI**: a user-space PCI server enumerates devices and hands out
+  per-device port and IRQ capabilities to drivers (since M8, see above).
 
 ## Syscall ABI
 
@@ -495,7 +571,14 @@ object types and error codes live in `include/abi/syscall.h`.
 | 20 | `irq_bind(irq, ntfn, bits)` | needs WRITE on both; unmasks the line |
 | 21 | `irq_ack(irq)` | needs WRITE; unmasks the line again |
 | 22 | `ntfn_bind(ntfn)` | needs READ; recv can now return `IPC_NOTIFIED` |
-| later | `map`, `unmap`, `thread_create`, `cap_revoke` | M8/M9 |
+| 23 | `frame_alloc(factory, pages) -> slot` | 1-64 contiguous zeroed pages; uses page budget |
+| 24 | `frame_info(frame) -> phys` | needs READ; pages in rdi |
+| 25 | `map(frame, vaddr, writable)` | needs READ (and WRITE if writable); own address space |
+| 26 | `unmap(vaddr)` | undoes the `map` that started at vaddr |
+| 27 | `factory_split(factory, objects, pages) -> slot` | a quota carved out of a factory |
+| 28 | `ioport_sub(factory, ioport, base, count) -> slot` | part of a port range |
+| 29 | `irq_get(factory, irq_control, line) -> slot` | each line claimed once |
+| later | `thread_create`, `cap_revoke` | M9 |
 
 ## Milestones
 
@@ -509,7 +592,8 @@ object types and error codes live in `include/abi/syscall.h`.
 | **M5** | Endpoints, notifications, capability tables | two processes talk only through capabilities they were given: 1000 call/reply round trips on the fast path, a capability passed in a reply, a cross-process notification; a dying server returns -ERR_DEAD to its caller ✅ |
 | **M6** | Root task spawns servers from a manifest | the root task starts a console server and a client from `system.manifest`, each holding only the capabilities its line grants; one crashing application leaves the rest running ✅ |
 | **M7** | User-space serial console driver (IRQ via notification) | the console server drives COM1 with its own I/O ports and IRQ 4; programs the root task starts can only print through it; a line typed on the serial port reaches it by interrupt; a program touching the port without permission is killed ✅ |
-| M8 | PCI server + virtio-blk/AHCI driver + tiny FS server | `cat` a file from disk |
+| **M8a** | Memory capabilities + PCI server | a driver gets a frame from its own quota and maps it; the PCI server hands it exactly its disk's ports and IRQ; it reads the disk's size from the device ✅ |
+| M8b | virtio-blk driver + tiny FS server | `cat` a file from disk |
 | M9 | Fault supervision + restart | kill the disk driver, system survives |
 | M10 | virtio-net + user-space TCP/IP stack (stretch) | ping the guest |
 

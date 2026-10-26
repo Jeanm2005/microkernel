@@ -4,6 +4,7 @@
 #include <kernel/cap.h>
 #include <kernel/ipc.h>
 #include <kernel/irq.h>
+#include <kernel/memory.h>
 #include <kernel/object.h>
 #include <kernel/process.h>
 #include <kernel/sched.h>
@@ -61,6 +62,15 @@ uint64_t syscall_handle(struct syscall_regs *r)
     case SYS_IRQ_BIND:    return (uint64_t)sys_irq_bind(cs, (int64_t)a[0], (int64_t)a[1], a[2]);
     case SYS_IRQ_ACK:     return (uint64_t)sys_irq_ack(cs, (int64_t)a[0]);
     case SYS_NTFN_BIND:   return ipc_ntfn_bind(r);
+
+    case SYS_FRAME_ALLOC: return (uint64_t)sys_frame_alloc(cs, (int64_t)a[0], a[1]);
+    case SYS_FRAME_INFO:  return (uint64_t)sys_frame_info(cs, (int64_t)a[0], &a[0]);
+    case SYS_MAP:         return (uint64_t)sys_map(cs, (int64_t)a[0], a[1], a[2]);
+    case SYS_UNMAP:       return (uint64_t)sys_unmap(a[0]);
+    case SYS_FACTORY_SPLIT: return (uint64_t)sys_factory_split(cs, (int64_t)a[0], a[1], a[2]);
+    case SYS_IOPORT_SUB:  return (uint64_t)sys_ioport_sub(cs, (int64_t)a[0], (int64_t)a[1],
+                                                          a[2], a[3]);
+    case SYS_IRQ_GET:     return (uint64_t)sys_irq_get(cs, (int64_t)a[0], (int64_t)a[1], a[2]);
 
     default:              return (uint64_t)-ERR_NOSYS;
     }

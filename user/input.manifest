@@ -2,6 +2,6 @@
 # waits until the console has received a line on the serial port, which
 # reaches the console as IRQ 4.
 #
-# name	image	     priority	provides	uses	devices	 arg
-console	console.elf	200	console		 -	com1	  0
-reader  hello.elf       100     -               console -         2
+# name      image         priority  provides  uses      devices  quota  arg
+console     console.elf   200       console   -         com1     -      0
+reader      hello.elf     100       -         console   -        -      2

@@ -4,7 +4,9 @@
 #include <abi/syscall.h>
 #include <kernel/elf.h>
 #include <kernel/ipc.h>
+#include <kernel/irq.h>
 #include <kernel/kprintf.h>
+#include <kernel/memory.h>
 #include <kernel/mm.h>
 #include <kernel/panic.h>
 #include <kernel/pmm.h>
@@ -119,6 +121,8 @@ void process_handle_gone(struct process *p)
      * and the handle's. */
     thread_discard(p->thread);
     p->thread = NULL;
+    memory_unmap_all(p);
+    ioport_release(p);
     paging_destroy_root(p->root, true);
     p->root = 0;
     cspace_clear(&p->cspace);
@@ -154,9 +158,13 @@ void process_wait(struct process *p)
  * from for the last time, with interrupts off. */
 void process_thread_gone(struct process *p)
 {
-    /* Its address space is no longer active and every frame in its user
-     * half belongs to it alone, so the memory can go. Its capabilities go
-     * too, which frees any object nobody else holds. */
+    /* Its address space is no longer active. Frames it mapped are
+     * unmapped first (they may be shared, and are freed only with their
+     * last reference); everything else in its user half belongs to it
+     * alone, so that memory can go. Its capabilities go too, which frees
+     * any object nobody else holds. */
+    memory_unmap_all(p);
+    ioport_release(p);
     paging_destroy_root(p->root, true);
     p->root = 0;
     cspace_clear(&p->cspace);

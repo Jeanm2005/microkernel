@@ -40,7 +40,7 @@ static void run_pair(const struct boot_info *boot, uint64_t server_mode, uint64_
                      struct process **server_out, struct process **client_out)
 {
     struct kobj *ep = kobj_create(KOBJ_ENDPOINT, NULL);
-    struct kobj *factory = factory_create(8);
+    struct kobj *factory = factory_create(8, 0);
     kassert(ep && factory);
 
     struct process *server = make(boot, "pong", server_mode);

@@ -15,6 +15,14 @@
 #define USER_STACK_SIZE  (16 * 1024)
 
 struct thread;
+struct frame;
+
+#define PROC_MAPPINGS 16   /* frames one process can have mapped at once */
+
+struct mapping {
+    uint64_t      vaddr;
+    struct frame *frame;   /* NULL = unused entry; holds a reference */
+};
 
 struct process {
     char           name[24];
@@ -25,8 +33,13 @@ struct process {
 
     bool           started;        /* process_start() has run */
     bool           may_debug_write; /* only processes the kernel itself started */
-    bool           has_io;         /* io_allowed has any bit set */
-    uint8_t        io_allowed[ARCH_IO_PORTS / 8];   /* 1 bit per port, 1 = allowed */
+
+    /* I/O ports it may use: 1 bit per port, 1 = allowed, only bytes
+     * [io_lo, io_hi) in use. NULL until it enables its first port. */
+    uint8_t       *io_allowed;
+    uint32_t       io_lo, io_hi;
+
+    struct mapping maps[PROC_MAPPINGS];   /* frames mapped with SYS_MAP */
 
     /* Status, written once by the dying thread and read by waiters. */
     volatile bool  exited;

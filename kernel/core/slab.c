@@ -8,6 +8,7 @@
  * object's slab by rounding its address down to the page. Free objects
  * form a linked list through their first word. */
 #include <stdbool.h>
+#include <arch/cpu.h>
 #include <kernel/kprintf.h>
 #include <kernel/mm.h>
 #include <kernel/panic.h>
@@ -85,7 +86,9 @@ static struct slab *new_slab(struct slab_cache *c)
     return s;
 }
 
-void *slab_alloc(struct slab_cache *c)
+/* Both entry points run with interrupts off: system calls are
+ * preemptible, so two threads could otherwise use a cache at once. */
+static void *alloc_locked(struct slab_cache *c)
 {
     struct slab *s = c->partial;
     if (!s) {
@@ -109,7 +112,15 @@ void *slab_alloc(struct slab_cache *c)
     return o;
 }
 
-void slab_free(struct slab_cache *c, void *obj)
+void *slab_alloc(struct slab_cache *c)
+{
+    uint64_t flags = irq_save();
+    void *o = alloc_locked(c);
+    irq_restore(flags);
+    return o;
+}
+
+static void free_locked(struct slab_cache *c, void *obj)
 {
     struct slab *s = (struct slab *)ALIGN_DOWN((uint64_t)obj, PAGE_SIZE);
     if (s->magic != SLAB_MAGIC || s->cache != c)
@@ -143,4 +154,11 @@ void slab_free(struct slab_cache *c, void *obj)
         c->slabs--;
         pmm_free(hhdm_to_phys(s));
     }
+}
+
+void slab_free(struct slab_cache *c, void *obj)
+{
+    uint64_t flags = irq_save();
+    free_locked(c, obj);
+    irq_restore(flags);
 }

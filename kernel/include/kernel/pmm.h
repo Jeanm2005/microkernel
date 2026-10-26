@@ -19,5 +19,10 @@ uint64_t pmm_alloc(void);          /* contents undefined */
 uint64_t pmm_alloc_zeroed(void);
 void     pmm_free(uint64_t frame);
 
+/* `pages` physically consecutive frames, zeroed (for DMA buffers, which
+ * devices address physically). Returns the first frame or PMM_NONE. */
+uint64_t pmm_alloc_contig(uint64_t pages);
+void     pmm_free_contig(uint64_t frame, uint64_t pages);
+
 uint64_t pmm_free_frames(void);
 uint64_t pmm_total_frames(void);

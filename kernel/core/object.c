@@ -3,12 +3,14 @@
 #include <kernel/kprintf.h>
 #include <kernel/object.h>
 #include <kernel/panic.h>
+#include <kernel/pmm.h>
 #include <kernel/process.h>
 #include <kernel/slab.h>
 #include <kernel/string.h>
 
 static struct slab_cache endpoint_cache, notification_cache, factory_cache,
-                         module_cache, process_obj_cache, ioport_cache, irq_cache;
+                         module_cache, process_obj_cache, ioport_cache, irq_cache,
+                         frame_cache, irq_control_cache;
 
 void object_init(void)
 {
@@ -19,6 +21,8 @@ void object_init(void)
     slab_cache_init(&process_obj_cache, "process_obj", sizeof(struct process_obj));
     slab_cache_init(&ioport_cache, "ioport", sizeof(struct ioport));
     slab_cache_init(&irq_cache, "irq", sizeof(struct irq));
+    slab_cache_init(&frame_cache, "frame", sizeof(struct frame));
+    slab_cache_init(&irq_control_cache, "irq_control", sizeof(struct kobj));
 }
 
 static struct slab_cache *cache_for(uint32_t type)
@@ -31,6 +35,8 @@ static struct slab_cache *cache_for(uint32_t type)
     case KOBJ_PROCESS:      return &process_obj_cache;
     case KOBJ_IOPORT:       return &ioport_cache;
     case KOBJ_IRQ:          return &irq_cache;
+    case KOBJ_FRAME:        return &frame_cache;
+    case KOBJ_IRQ_CONTROL:  return &irq_control_cache;
     default:                return NULL;
     }
 }
@@ -45,6 +51,8 @@ const char *kobj_type_name(uint32_t type)
     case KOBJ_PROCESS:      return "process";
     case KOBJ_IOPORT:       return "ioport";
     case KOBJ_IRQ:          return "irq";
+    case KOBJ_FRAME:        return "frame";
+    case KOBJ_IRQ_CONTROL:  return "irq_control";
     default:                return "?";
     }
 }
@@ -82,12 +90,13 @@ struct kobj *kobj_create(enum kobj_type type, struct factory *from)
     return o;
 }
 
-struct kobj *factory_create(uint32_t budget)
+struct kobj *factory_create(uint32_t objects, uint32_t pages)
 {
     struct factory *f = (struct factory *)kobj_create(KOBJ_FACTORY, NULL);
     if (!f)
         return NULL;
-    f->budget = budget;
+    f->budget = objects;
+    f->pages = pages;
     return &f->obj;
 }
 
@@ -105,9 +114,9 @@ struct kobj *module_create(const char *name, const void *data, uint64_t size)
     return &m->obj;
 }
 
-struct kobj *ioport_create(uint16_t base, uint16_t count)
+struct kobj *ioport_create(uint32_t base, uint32_t count, struct factory *from)
 {
-    struct ioport *io = (struct ioport *)kobj_create(KOBJ_IOPORT, NULL);
+    struct ioport *io = (struct ioport *)kobj_create(KOBJ_IOPORT, from);
     if (!io)
         return NULL;
     io->base = base;
@@ -115,13 +124,9 @@ struct kobj *ioport_create(uint16_t base, uint16_t count)
     return &io->obj;
 }
 
-struct kobj *irq_create(uint32_t line)
+struct kobj *irq_control_create(void)
 {
-    struct irq *q = (struct irq *)kobj_create(KOBJ_IRQ, NULL);
-    if (!q)
-        return NULL;
-    q->line = line;
-    return &q->obj;
+    return kobj_create(KOBJ_IRQ_CONTROL, NULL);
 }
 
 void kobj_get(struct kobj *o)
@@ -156,11 +161,25 @@ void kobj_put(struct kobj *o)
             process_handle_gone(p);
     }
 
+    /* What goes back to the factory that paid: the object itself, plus a
+     * frame's pages, plus whatever budget a split-off factory still has
+     * (all of it, since everything it made is gone by now). */
+    uint32_t objects = 1, pages = 0;
+    if (o->type == KOBJ_FRAME) {
+        struct frame *fr = (struct frame *)o;
+        pmm_free_contig(fr->phys, fr->pages);
+        pages = fr->pages;
+    } else if (o->type == KOBJ_FACTORY) {
+        objects += ((struct factory *)o)->budget;
+        pages = ((struct factory *)o)->pages;
+    }
+
     struct factory *origin = o->origin;
     slab_free(cache_for(o->type), o);
     if (origin) {
         flags = irq_save();
-        origin->budget++;
+        origin->budget += objects;
+        origin->pages += pages;
         irq_restore(flags);
         kobj_put(&origin->obj);
     }

@@ -1,4 +1,3 @@
-#include <stdbool.h>
 #include <stddef.h>
 #include <arch/ioport.h>
 #include <kernel/string.h>
@@ -44,17 +43,19 @@ static struct gdt_entry gdt[7] __attribute__((aligned(16))) = {
     [4] = SEG(A_PRESENT | A_DPL3 | A_CODEDATA | A_EXEC | A_RW, F_LONG | F_GRAN4K),
 };
 
-/* The TSS, followed by the I/O permission bitmap: one bit per port,
- * 1 = refused, checked by the CPU on every in/out in ring 3. Ports past
- * the end of the bitmap are refused too, and the CPU needs one extra byte
- * of all-ones after it. */
+/* The TSS, followed by the I/O permission bitmap: one bit per port (all
+ * 65536), 1 = refused, checked by the CPU on every in/out in ring 3. The
+ * CPU needs one extra byte of all-ones after it. */
 #define IOMAP_BYTES (ARCH_IO_PORTS / 8)
 static struct {
     struct tss tss;
     uint8_t    iomap[IOMAP_BYTES + 1];
 } __attribute__((packed, aligned(16))) tss_block;
 
-static bool iomap_open;   /* some port is currently allowed */
+/* Bytes [open_lo, open_hi) of the bitmap may have bits cleared (ports
+ * allowed); everything else is all-ones. Keeping track of this means a
+ * switch only touches the bytes that matter: for COM1, one byte. */
+static uint32_t open_lo, open_hi;
 
 #define IST_STACK_SIZE 16384
 static uint8_t ist_stacks[3][IST_STACK_SIZE] __attribute__((aligned(16)));
@@ -119,18 +120,17 @@ void tss_set_kernel_stack(uint64_t rsp0)
     tss_block.tss.rsp[0] = rsp0;
 }
 
-/* Called on every context switch: copy in the next process's ports (128
- * bytes), or close them all again if the last process had some. */
-void arch_set_io_bitmap(const uint8_t *allowed)
+/* Called on every context switch: close the previous process's ports,
+ * then open the next one's. */
+void arch_set_io_bitmap(const uint8_t *allowed, uint32_t lo, uint32_t hi)
 {
-    if (!allowed) {
-        if (iomap_open) {
-            memset(tss_block.iomap, 0xff, IOMAP_BYTES);
-            iomap_open = false;
-        }
+    if (open_hi > open_lo)
+        memset(tss_block.iomap + open_lo, 0xff, open_hi - open_lo);
+    open_lo = open_hi = 0;
+    if (!allowed || hi <= lo)
         return;
-    }
-    for (int i = 0; i < IOMAP_BYTES; i++)
+    for (uint32_t i = lo; i < hi; i++)
         tss_block.iomap[i] = (uint8_t)~allowed[i];
-    iomap_open = true;
+    open_lo = lo;
+    open_hi = hi;
 }

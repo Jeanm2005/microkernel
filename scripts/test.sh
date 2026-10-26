@@ -111,22 +111,44 @@ run_case boot "" 1 \
     "[pong] quitting" \
     "[ping] done, 0 failure(s)" \
     "selftest: ipc ok" \
-    "[root] read system.manifest: 2 programs" \
+    "[root] read system.manifest: 4 programs" \
     "[root] ok: can't create a process above its own priority" \
     "[root] ok: a process image must come from a module capability" \
     "[root] ok: a process that was never started can be discarded" \
     "[root] console serves 'console'" \
     "[root] console drives 'com1'" \
-    "[root] hello uses 'console' as client 1" \
+    "[root] pci gets a quota of 16 objects and 0 pages" \
+    "[root] pci drives 'pci'" \
+    "[root] blk gets a quota of 4 objects and 8 pages" \
     "[root] started console (priority 200)" \
     "[console] ready: driving COM1 from user space, input by IRQ 4" \
     "[root] output now goes through the console server" \
+    "[pci] 00:03.0 1af4:1001 virtio block device" \
+    "[blk] ok: allocated a 2-page frame from its own quota" \
+    "[blk] ok: can't allocate beyond its page quota" \
+    "[blk] ok: the frame's physical address is known (what a device needs for DMA)" \
+    "[blk] ok: can't map into the kernel half" \
+    "[blk] ok: can't map over its own program" \
+    "[blk] ok: it reads back what was written" \
+    "[blk] ok: can't map over an existing mapping" \
+    "[blk] ok: a read-only frame capability can't be mapped writable" \
+    "[blk] ok: mapped read-only at a second address, it shows the same memory" \
+    "[blk] ok: unmapped both" \
+    "[blk] ok: the PCI server hands out a device's ports only after it is claimed" \
+    "[blk] ok: claimed the device" \
+    "[blk] ok: another client can neither claim it nor get its ports" \
+    "[blk] ok: received the device's I/O ports as a capability" \
+    "[blk] ok: received the device's interrupt line as a capability" \
+    "[blk] disk: 2048 sectors of 512 bytes (1024 KiB)" \
+    "[blk] ok: bound the disk's interrupt to a notification from its own quota" \
+    "[blk] done, 0 failure(s)" \
     "[hello] ok: holds only the capabilities its manifest line lists" \
     "[hello] ok: can send to the console but not receive from it" \
     "[hello] ok: printing through the kernel is refused; this line came through the console" \
     "[hello] hello from a client of the console server" \
     "[hello] ok: the console refuses a shutdown request from a client" \
     "[root] hello exited with code 0" \
+    "[root] pci shut down" \
     "[console] shutting down" \
     "[root] console shut down" \
     "[root] system finished, 0 failure(s)" \

@@ -14,7 +14,11 @@
  *                                                none, <0 = -ERR_FULL)
  *
  * A capability (cap) is named by its slot number in the calling process's
- * capability table. Slot 0 is always empty. */
+ * capability table. Slot 0 is always empty.
+ *
+ * A thread with a bound notification (SYS_NTFN_BIND) can be woken from
+ * SYS_RECV / SYS_REPLY_RECV by that notification: the call then returns
+ * IPC_NOTIFIED instead of 0, with the notification's bits in rdi. */
 #pragma once
 
 enum syscall_nr {
@@ -48,13 +52,32 @@ enum syscall_nr {
     SYS_PROC_START  = 17,  /* (proc, arg) -> 0; main(arg) starts running */
     SYS_PROC_WAIT   = 18,  /* (proc) -> 0, exit code in rdi; -ERR_DEAD if it was killed */
 
+    /* Devices and events. */
+    SYS_IOPORT_ENABLE = 19, /* (ioport) -> 0; this process may now use those ports */
+    SYS_IRQ_BIND    = 20,  /* (irq, ntfn, bits) -> 0; the IRQ signals ntfn with bits */
+    SYS_IRQ_ACK     = 21,  /* (irq) -> 0; done with the device, deliver the next one */
+    SYS_NTFN_BIND   = 22,  /* (ntfn) -> 0; recv also returns when ntfn is signalled */
+
+    /* Memory. */
+    SYS_FRAME_ALLOC = 23,  /* (factory, pages) -> new slot; zeroed, physically contiguous */
+    SYS_FRAME_INFO  = 24,  /* (frame) -> physical address, pages in rdi */
+    SYS_MAP         = 25,  /* (frame, vaddr, writable) -> 0; map it into this process */
+    SYS_UNMAP       = 26,  /* (vaddr) -> 0; undo the SYS_MAP that started at vaddr */
+
+    /* Handing out parts of what we hold. */
+    SYS_FACTORY_SPLIT = 27, /* (factory, objects, pages) -> new factory with that much budget */
+    SYS_IOPORT_SUB  = 28,  /* (factory, ioport, base, count) -> new slot for a sub-range */
+    SYS_IRQ_GET     = 29,  /* (factory, irq_control, line) -> new IRQ slot; once per line */
+
     SYS_COUNT
 };
 
 /* Rights a capability can carry. A copy can only have fewer. */
-#define CAP_READ    (1 << 0)   /* recv, wait, read a module, wait for a process */
+#define CAP_READ    (1 << 0)   /* recv, wait, bind a notification, read a module,
+                                  wait for a process */
 #define CAP_WRITE   (1 << 1)   /* send/call, notify, create from a factory,
-                                  give caps to or start a process */
+                                  give caps to or start a process, use I/O
+                                  ports, bind or acknowledge an IRQ */
 #define CAP_GRANT   (1 << 2)   /* caps may travel in messages over this endpoint */
 #define CAP_ALL     (CAP_READ | CAP_WRITE | CAP_GRANT)
 
@@ -66,15 +89,24 @@ enum syscall_nr {
 #define OBJ_FACTORY       3
 #define OBJ_MODULE        4
 #define OBJ_PROCESS       5
-#define OBJ_IOPORT        6  /* a range of I/O ports */
-#define OBJ_IRQ           7  /* one hardware interrupt line */
+#define OBJ_IOPORT        6   /* a range of I/O ports */
+#define OBJ_IRQ           7   /* one hardware interrupt line */
+#define OBJ_FRAME         8   /* physically contiguous RAM */
+#define OBJ_IRQ_CONTROL   9   /* the right to claim interrupt lines */
 
-/* Returned by SYS_RECV and SYS_REPLY_RECV when the bound notification woke the thread
- * instead of a message. */
-#define IPC_NOTIFIED 1
+/* SYS_MAP: where a process may map frames (above its program and below
+ * its stack), and the largest frame SYS_FRAME_ALLOC makes. */
+#define USER_MAP_BASE     0x0000000100000000ull   /* 4 GiB */
+#define USER_MAP_END      0x00007f0000000000ull
+#define FRAME_MAX_PAGES   64                      /* 256 KiB */
+
+/* Returned by SYS_RECV and SYS_REPLY_RECV when the bound notification
+ * woke the thread instead of a message. */
+#define IPC_NOTIFIED      1
 
 /* Errors (returned negated). */
-#define ERR_PERM    1    /* the capability lacks a needed right */
+#define ERR_PERM    1    /* the capability lacks a needed right, or the
+                            process may not do this at all */
 #define ERR_BADCAP  9    /* no capability in that slot */
 #define ERR_NOMEM   12   /* out of kernel memory or factory budget */
 #define ERR_FAULT   14   /* a pointer argument isn't valid user memory */
