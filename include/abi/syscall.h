@@ -73,6 +73,9 @@ enum syscall_nr {
     SYS_PROC_POLL   = 31,  /* (proc) -> like wait, but -ERR_AGAIN while running */
     SYS_IRQ_UNBIND  = 32,  /* (irq) -> 0; mask line and release its notification */
 
+    SYS_WAIT_UNTIL  = 33,  /* (ntfn, absolute_tick) -> bits, or -ERR_TIMEDOUT */
+    SYS_CLOCK       = 34,  /* () -> monotonic ticks, CLOCK_HZ ticks per second */
+
     SYS_COUNT
 };
 
@@ -111,6 +114,9 @@ enum syscall_nr {
 /* Errors (returned negated). */
 #define ERR_PERM    1    /* the capability lacks a needed right, or the
                             process may not do this at all */
+#define ERR_IO      5    /* device I/O failed */
+#define ERR_TIMEDOUT 110 /* wait deadline expired */
+#define CLOCK_HZ    100
 #define ERR_AGAIN   11   /* process has not exited yet */
 #define ERR_BADCAP  9    /* no capability in that slot */
 #define ERR_NOMEM   12   /* out of kernel memory or factory budget */

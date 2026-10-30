@@ -48,7 +48,9 @@ static void misbehave(long mode)
 int main(long mode)
 {
     if (mode == ROOT_MODE_INIT || mode == ROOT_MODE_INIT_CRASH || mode == ROOT_MODE_INIT_INPUT ||
-        mode == ROOT_MODE_INIT_RESTART)
+        mode == ROOT_MODE_INIT_RESTART || mode == ROOT_MODE_INIT_TIMEOUT ||
+        mode == ROOT_MODE_INIT_REPEATED || mode == ROOT_MODE_INIT_EXHAUST ||
+        mode == ROOT_MODE_INIT_BOOT_TIMEOUT || mode == ROOT_MODE_INIT_NOISY_TIMEOUT)
         return init_main(mode);
     if (mode == ROOT_MODE_IPC_SERVER || mode == ROOT_MODE_IPC_SERVER_CRASH)
         return ipc_server(mode);

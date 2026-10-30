@@ -43,7 +43,7 @@ uint64_t syscall_handle(struct syscall_regs *r)
     case SYS_REPLY:       return ipc_reply(r, false);
     case SYS_REPLY_RECV:  return ipc_reply(r, true);
     case SYS_NOTIFY:      return ipc_notify(r);
-    case SYS_WAIT:        return ipc_wait(r);
+    case SYS_WAIT:        return ipc_wait(r, false);
 
     case SYS_CAP_COPY:    return (uint64_t)cspace_copy(cs, (int64_t)a[0], (uint32_t)a[1], a[2]);
     case SYS_CAP_DELETE:  return (uint64_t)cspace_delete(cs, (int64_t)a[0]);
@@ -75,6 +75,9 @@ uint64_t syscall_handle(struct syscall_regs *r)
     case SYS_PROC_WATCH: return (uint64_t)sys_proc_watch(cs, (int64_t)a[0], (int64_t)a[1], a[2]);
     case SYS_PROC_POLL: return (uint64_t)sys_proc_poll(cs, (int64_t)a[0], &a[0]);
     case SYS_IRQ_UNBIND: return (uint64_t)sys_irq_unbind(cs, (int64_t)a[0]);
+
+    case SYS_WAIT_UNTIL: return ipc_wait(r, true);
+    case SYS_CLOCK: return sched_ticks();
 
     default:              return (uint64_t)-ERR_NOSYS;
     }

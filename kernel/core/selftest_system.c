@@ -37,7 +37,7 @@ static void give(struct process *p, struct kobj *o, uint32_t rights, int64_t wan
 }
 
 /* Run the root task in `mode` until it exits. */
-static struct process *run_system(const struct boot_info *boot, uint64_t mode)
+static struct process *run_system_status(const struct boot_info *boot, uint64_t mode, int expected)
 {
     const struct boot_module *rm = boot_find_module(boot, "root.elf");
     kassert(rm);
@@ -60,15 +60,22 @@ static struct process *run_system(const struct boot_info *boot, uint64_t mode)
     process_wait(root);
     if (root->killed)
         panic("root task was killed: %s", root->kill_reason);
-    if (root->exit_code != 0)
+    if (root->exit_code != expected)
         panic("root task exited with code %d", root->exit_code);
     return root;
+}
+
+static struct process *run_system(const struct boot_info *boot, uint64_t mode)
+{
+    return run_system_status(boot, mode, 0);
 }
 
 bool system_selftest_wanted(const char *name)
 {
     return strcmp(name, "app-crash") == 0 || strcmp(name, "console-input") == 0 ||
-           strcmp(name, "driver-restart") == 0;
+           strcmp(name, "driver-restart") == 0 ||
+           strcmp(name, "disk-timeout") == 0 || strcmp(name, "driver-repeated") == 0 ||
+           strcmp(name, "driver-exhausted") == 0 || strcmp(name, "disk-boot-timeout") == 0 || strcmp(name, "disk-noisy-timeout") == 0;
 }
 
 void system_selftest_boot(const struct boot_info *boot)
@@ -86,6 +93,21 @@ void system_selftest_boot(const struct boot_info *boot)
 
 bool system_selftest_run(const char *name, const struct boot_info *boot)
 {
+    if (strcmp(name, "disk-timeout") == 0 || strcmp(name, "driver-repeated") == 0 ||
+        strcmp(name, "driver-exhausted") == 0 || strcmp(name, "disk-boot-timeout") == 0 ||
+        strcmp(name, "disk-noisy-timeout") == 0) {
+        bool boot_timeout = strcmp(name, "disk-boot-timeout") == 0;
+        bool exhausted = strcmp(name, "driver-exhausted") == 0 || boot_timeout;
+        uint64_t mode = strcmp(name, "disk-noisy-timeout") == 0 ? ROOT_MODE_INIT_NOISY_TIMEOUT :
+            boot_timeout ? ROOT_MODE_INIT_BOOT_TIMEOUT :
+            exhausted ? ROOT_MODE_INIT_EXHAUST :
+            strcmp(name, "disk-timeout") == 0 ? ROOT_MODE_INIT_TIMEOUT : ROOT_MODE_INIT_REPEATED;
+        uint64_t before = pmm_free_frames();
+        process_put(run_system_status(boot, mode, exhausted ? 1 : 0));
+        kassert(pmm_free_frames() == before);
+        kprintf("selftest: %s completed; no frames leaked\n", name);
+        return true;
+    }
     if (strcmp(name, "driver-restart") == 0) {
         uint64_t before = pmm_free_frames();
         process_put(run_system(boot, ROOT_MODE_INIT_RESTART));

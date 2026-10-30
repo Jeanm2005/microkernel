@@ -17,6 +17,11 @@ enum root_mode {
     /* The real job: start the system described by a manifest. */
     ROOT_MODE_INIT        = 8,  /* system.manifest */
     ROOT_MODE_INIT_CRASH  = 9,  /* crash.manifest: one application crashes */
+    ROOT_MODE_INIT_NOISY_TIMEOUT = 16, /* pending bits must not extend the request deadline */
+    ROOT_MODE_INIT_BOOT_TIMEOUT = 15, /* device never completes even its first probe */
+    ROOT_MODE_INIT_TIMEOUT = 12, /* request completion never arrives */
+    ROOT_MODE_INIT_REPEATED = 13, /* successive fault, timeout, fault */
+    ROOT_MODE_INIT_EXHAUST = 14, /* all attempts time out, including replacements */
     ROOT_MODE_INIT_RESTART = 11, /* disk driver faults during a filesystem read */
     ROOT_MODE_INIT_INPUT  = 10, /* input.manifest: wait for a line of input */
 };

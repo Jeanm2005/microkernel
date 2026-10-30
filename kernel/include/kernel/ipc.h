@@ -29,6 +29,8 @@ struct ipc_state {
     int64_t        status;       /* 0 or -ERR_*, set by whoever wakes us */
     struct thread *reply_to;     /* caller waiting for our reply, if any */
     bool           reply_grants; /* ... and whether it accepts caps */
+    struct thread *timeout_next; /* separate from the object wait queue */
+    uint64_t deadline;           /* absolute scheduler tick, 0 if not armed */
     struct notification *bound_ntfn; /* can interrupt our recv (holds a ref) */
 };
 
@@ -36,7 +38,8 @@ uint64_t ipc_send(struct syscall_regs *r, bool call);
 uint64_t ipc_recv(struct syscall_regs *r);
 uint64_t ipc_reply(struct syscall_regs *r, bool then_recv);
 uint64_t ipc_notify(struct syscall_regs *r);
-uint64_t ipc_wait(struct syscall_regs *r);
+uint64_t ipc_wait(struct syscall_regs *r, bool timed);
+void ipc_timer_tick(uint64_t now); /* timer IRQ, interrupts off */
 uint64_t ipc_ntfn_bind(struct syscall_regs *r);
 
 /* Set `bits` in `n` and wake whoever is waiting for it: a thread in

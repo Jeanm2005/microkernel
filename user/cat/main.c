@@ -12,25 +12,32 @@ static int request(long op, long a, long b, long c, long expected)
 int main(void)
 {
     printf_use_console(SLOT_USES);
+    struct msg m = { .w = { FS_STAT } };
+    memcpy(&m.w[1], "hello.txt", 10);
+    long r = sys_call(FS, &m, 0);
+    if (r || m.w[0] != 1 || m.w[1] < 0) {
+        printf("cannot open hello.txt: error %ld\n", r ? r : m.w[0]);
+        return 1;
+    }
+    long size = m.w[1], offset = 0;
     check(request(PROTO_SHUTDOWN, 0, 0, 0, -ERR_PERM), "filesystem refuses client shutdown");
     check(request(FS_READ, 2, 0, 24, -ERR_INVAL) &&
           request(FS_READ, 1, -1, 24, -ERR_INVAL) &&
           request(FS_READ, 1, 0, 25, -ERR_INVAL), "filesystem rejects invalid reads");
-    struct msg m = { .w = { FS_STAT } };
+    m = (struct msg){ .w = { FS_STAT } };
     memcpy(&m.w[1], "missing", 8);
     check(sys_call(FS, &m, 0) == 0 && m.w[0] == -ERR_INVAL, "missing file is refused");
-    m = (struct msg){ .w = { FS_STAT } };
-    memcpy(&m.w[1], "hello.txt", 10);
-    if (sys_call(FS, &m, 0) || m.w[0] != 1 || m.w[1] < 0) return 1;
-    long size = m.w[1], offset = 0;
     printf("cat hello.txt (%ld bytes):\n", size);
     /* Collect a line for console output; file reads still use 24-byte IPC. */
     char line[128];
     unsigned n = 0;
     while (offset < size) {
         m = (struct msg){ .w = { FS_READ, 1, offset, STORAGE_CHUNK } };
-        if (sys_call(FS, &m, 0) || m.w[0] <= 0 || m.w[0] > STORAGE_CHUNK ||
-            m.w[0] > size - offset) return 1;
+        r = sys_call(FS, &m, 0);
+        if (r || m.w[0] <= 0 || m.w[0] > STORAGE_CHUNK || m.w[0] > size - offset) {
+            printf("cannot read hello.txt: error %ld\n", r ? r : m.w[0]);
+            return 1;
+        }
         char *bytes = (char *)&m.w[1];
         for (long i = 0; i < m.w[0]; i++) {
             line[n++] = bytes[i];

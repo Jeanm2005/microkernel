@@ -23,6 +23,21 @@
 #include <kernel/string.h>
 #include <kernel/syscall.h>
 
+/* Timed notification waiters also remain in the notification's FIFO.
+ * A separate link lets the timer remove exactly one waiter atomically. */
+static struct thread *timeouts;
+
+static void disarm_timeout(struct thread *t)
+{
+    if (!t->ipc.deadline)
+        return;
+    struct thread **link = &timeouts;
+    while (*link != t) link = &(*link)->ipc.timeout_next;
+    *link = t->ipc.timeout_next;
+    t->ipc.timeout_next = NULL;
+    t->ipc.deadline = 0;
+}
+
 static struct cspace *my_cspace(void)
 {
     return &thread_current()->proc->cspace;
@@ -73,6 +88,7 @@ static void deliver(struct thread *to, struct ipc_msg *m)
 
 static void unblock_from_object(struct thread *t)
 {
+    disarm_timeout(t);
     if (t->ipc.blocked_on) {
         kobj_put(t->ipc.blocked_on);   /* never the last ref: a cap holds one */
         t->ipc.blocked_on = NULL;
@@ -342,7 +358,7 @@ uint64_t ipc_ntfn_bind(struct syscall_regs *r)
     return (uint64_t)err;
 }
 
-uint64_t ipc_wait(struct syscall_regs *r)
+uint64_t ipc_wait(struct syscall_regs *r, bool timed)
 {
     uint64_t flags = irq_save();
     struct thread *me = thread_current();
@@ -356,11 +372,39 @@ uint64_t ipc_wait(struct syscall_regs *r)
     if (n->word) {
         r->arg[0] = n->word;
         n->word = 0;
+    } else if (timed && r->arg[1] <= sched_ticks()) {
+        err = -ERR_TIMEDOUT;
     } else {
         block_on(me, &n->obj, &n->waiters, IPC_WAIT);
+        if (timed) {
+            me->ipc.deadline = r->arg[1];
+            me->ipc.timeout_next = timeouts;
+            timeouts = me;
+        }
         sched_block();
-        r->arg[0] = me->ipc.in[0];
+        err = me->ipc.status;
+        if (!err) r->arg[0] = me->ipc.in[0];
     }
     irq_restore(flags);
-    return 0;
+    return (uint64_t)err;
+}
+
+void ipc_timer_tick(uint64_t now)
+{
+    struct thread **link = &timeouts;
+    while (*link) {
+        struct thread *t = *link;
+        if (t->ipc.deadline > now) {
+            link = &t->ipc.timeout_next;
+            continue;
+        }
+        *link = t->ipc.timeout_next;
+        t->ipc.timeout_next = NULL;
+        t->ipc.deadline = 0;
+        struct notification *n = (struct notification *)t->ipc.blocked_on;
+        waitq_remove(&n->waiters, t);
+        unblock_from_object(t);
+        t->ipc.status = -ERR_TIMEDOUT;
+        sched_wake(t);
+    }
 }

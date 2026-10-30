@@ -8,34 +8,38 @@
 
 static long disk_read(uint64_t sector, long offset, long count, void *out)
 {
-    struct msg m = { .w = { BLK_READ, (long)sector, offset, count } };
-    long r = sys_call(BLK, &m, 0);
-    /* A dead driver drops the in-flight call. The stable endpoint keeps
-     * this retry queued until root starts its replacement. */
-    if (r == -ERR_DEAD) {
-        printf("disk driver died; retrying on its replacement\n");
+    struct msg m;
+    long r;
+    /* Read retries are safe: there is no client write API. This per-read
+     * retry bound complements root's boot-wide restart budget. */
+    for (int retries = 0;; retries++) {
         m = (struct msg){ .w = { BLK_READ, (long)sector, offset, count } };
         r = sys_call(BLK, &m, 0);
+        if (r != -ERR_DEAD || retries == DISK_RESTART_LIMIT)
+            break;
+        printf("disk driver died; retrying on its replacement\n");
     }
-    if (r) return r;
+    if (r) return r == -ERR_DEAD ? -ERR_IO : r;
     if (m.w[0] != count) return m.w[0] < 0 ? m.w[0] : -ERR_INVAL;
     memcpy(out, &m.w[1], (size_t)count);
     return count;
 }
 
-int main(void)
+static uint64_t size;
+static char name[24];
+
+static int mount_file(void)
 {
-    printf_use_console(SLOT_USES);
     struct msg m = { .w = { BLK_SIZE } };
     if (sys_call(BLK, &m, 0) || m.w[0] < 3) return 1;
     uint64_t sectors = (uint64_t)m.w[0];
     uint64_t header[5];
     if (disk_read(0, 0, 24, header) < 0 || disk_read(0, 24, 16, &header[3]) < 0)
         return 1;
-    char *name = (char *)&header[2];
+    memcpy(name, &header[2], sizeof name);
     int terminated = 0;
     for (int i = 0; i < 24; i++) if (!name[i]) terminated = 1;
-    uint64_t size = header[1];
+    size = header[1];
     if (header[0] != TINYFS_MAGIC || !terminated || !name[0] || size > (sectors - 2) * 512)
         return 1;
     struct msg probe = { .w = { BLK_READ, (long)sectors, 0, 24 } };
@@ -48,6 +52,15 @@ int main(void)
     check(sys_call(BLK, &probe, 0) == 0 && probe.w[0] == -ERR_PERM,
           "block server refuses client shutdown");
     printf("mounted %s (%lu bytes)\n", name, size);
+    return 0;
+}
+
+int main(void)
+{
+    printf_use_console(SLOT_USES);
+    int unavailable = mount_file();
+    if (unavailable) printf("disk unavailable; serving I/O errors\n");
+    struct msg m;
     if (sys_recv(SLOT_SERVE, &m)) return 1;
     for (;;) {
         long reply[4] = { -ERR_INVAL, 0, 0, 0 };
@@ -55,6 +68,8 @@ int main(void)
         if (PROTO_OP(m.w[0]) == PROTO_SHUTDOWN) {
             reply[0] = m.badge ? -ERR_PERM : 0;
             stop = !m.badge;
+        } else if (unavailable) {
+            reply[0] = -ERR_IO;
         } else if (PROTO_OP(m.w[0]) == FS_STAT) {
             char query[25] = { 0 };
             memcpy(query, &m.w[1], 24);

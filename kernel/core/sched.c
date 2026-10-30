@@ -7,6 +7,7 @@
  * Run queues: one FIFO list per priority, plus a 256-bit bitmap of which
  * lists are non-empty, so finding the highest ready priority takes four
  * word checks no matter how many threads exist. */
+#include <abi/syscall.h>
 #include <arch/context.h>
 #include <arch/cpu.h>
 #include <arch/ioport.h>
@@ -19,6 +20,8 @@
 #include <kernel/sched.h>
 #include <kernel/slab.h>
 #include <kernel/string.h>
+
+_Static_assert(SCHED_HZ == CLOCK_HZ, "user clock frequency must match scheduler");
 
 struct run_queue {
     struct thread *head, *tail;
@@ -355,6 +358,7 @@ void sched_timer_tick(void)
     struct cpu *c = this_cpu();
     struct thread *cur = c->current;
     c->ticks++;
+    ipc_timer_tick(c->ticks);
     cur->run_ticks++;
 
     /* Wake sleepers whose time has come. */

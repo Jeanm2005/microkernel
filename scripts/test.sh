@@ -115,6 +115,10 @@ run_case boot "" 1 \
     "[root] ok: can't create a process above its own priority" \
     "[root] ok: a process image must come from a module capability" \
     "[root] ok: observing process exit requires a readable process capability" \
+    "[root] ok: an expired wait times out without changing output bits" \
+    "[root] ok: a blocked notification wait expires at its deadline" \
+    "[root] ok: pending notification bits win over expiration and are consumed once" \
+    "[root] ok: timed waits check notification capabilities before deadlines" \
     "[root] ok: exit watches validate notification rights and signal bits" \
     "[root] ok: polling a process that was never started is refused" \
     "[root] ok: a running child polls as pending and cannot change its watch" \
@@ -265,6 +269,58 @@ run_case driver-restart "selftest=driver-restart" 1 \
     "[root] ok: disk driver restarted exactly once" \
     "[root] blk shut down" \
     "selftest: disk driver restarted; filesystem survived; no frames leaked" \
+    "kernel: init complete"
+
+run_case disk-timeout "selftest=disk-timeout" 1 \
+    "[blk] simulating a disk request with no completion" \
+    "[blk] disk request timed out; exiting for supervisor recovery" \
+    "[root] observed disk driver I/O failure after process teardown" \
+    "[root] stopped disk DMA and released its old buffers" \
+    "[root] ok: disk timeout recovered with one restart" \
+    "[cat] End of the file: the second sector arrived intact." \
+    "[root] cat exited with code 0" \
+    "selftest: disk-timeout completed; no frames leaked" \
+    "kernel: init complete"
+
+run_case driver-repeated "selftest=driver-repeated" 1 \
+    "[blk] crashing during a filesystem request" \
+    "[blk] disk request timed out; exiting for supervisor recovery" \
+    "[root] ok: disk survived three successive recoveries" \
+    "[cat] End of the file: the second sector arrived intact." \
+    "[root] cat exited with code 0" \
+    "selftest: driver-repeated completed; no frames leaked" \
+    "kernel: init complete"
+
+run_case driver-exhausted "selftest=driver-exhausted" 1 \
+    "[root] disk restart budget exhausted; stopping the service" \
+    "[root] disk service unavailable; refusing request" \
+    "[cat] cannot read hello.txt: error -5" \
+    "[root] cat exited with code 1" \
+    "[root] ok: restart exhaustion stopped DMA without starting another driver" \
+    "[root] fs shut down" \
+    "[root] pci shut down" \
+    "[root] system finished, 2 failure(s)" \
+    "selftest: driver-exhausted completed; no frames leaked" \
+    "kernel: init complete"
+
+run_case disk-boot-timeout "selftest=disk-boot-timeout" 1 \
+    "[blk] disk request timed out; exiting for supervisor recovery" \
+    "[root] disk restart budget exhausted; stopping the service" \
+    "[root] disk service unavailable; refusing request" \
+    "[cat] cannot open hello.txt: error -5" \
+    "[fs] disk unavailable; serving I/O errors" \
+    "[root] cat exited with code 1" \
+    "[root] fs shut down" \
+    "[root] pci shut down" \
+    "[root] system finished, 2 failure(s)" \
+    "selftest: disk-boot-timeout completed; no frames leaked" \
+    "kernel: init complete"
+
+run_case disk-noisy-timeout "selftest=disk-noisy-timeout" 1 \
+    "[blk] disk request timed out; exiting for supervisor recovery" \
+    "[root] ok: disk timeout recovered with one restart" \
+    "[root] cat exited with code 0" \
+    "selftest: disk-noisy-timeout completed; no frames leaked" \
     "kernel: init complete"
 
 run_case unknown-selftest "selftest=nonsense" 3 \

@@ -5,6 +5,7 @@
 #include <abi/storage.h>
 #include "io.h"
 #include "ipc.h"
+#include "syscall.h"
 #include "ulib.h"
 
 #define CONSOLE  SLOT_USES
@@ -89,7 +90,8 @@ static volatile uint8_t *data, *status;
 static uint64_t dma_phys;
 static uint16_t qsize, submitted, completed, base;
 static long events, disk_irq, device_addr;
-static int crash_on_read;
+static long test_mode;
+static uint64_t capacity;
 
 static void barrier(void) { __sync_synchronize(); }
 
@@ -138,8 +140,16 @@ static int transfer(uint64_t sector, int write)
     barrier();
     avail[1] = ++submitted;
     barrier();
-    outw(base + 16, 0);
-    if (crash_on_read && !write && sector == 1) {
+    unsigned long deadline = sys_clock() + DISK_REQUEST_TICKS;
+    int stall = !write && (((test_mode == BLK_TEST_STALL || test_mode == BLK_TEST_STALL_NOISY) &&
+                            sector == 1) ||
+                           (test_mode == BLK_TEST_STALL_LATE && sector == 2) ||
+                           (test_mode == BLK_TEST_STALL_BOOT && sector == capacity - 1));
+    if (stall)
+        printf("simulating a disk request with no completion\n");
+    else
+        outw(base + 16, 0);
+    if (test_mode == BLK_TEST_CRASH && !write && sector == 1) {
         printf("crashing during a filesystem request after DMA submission\n");
         *(volatile int *)0 = 1;
     }
@@ -147,20 +157,29 @@ static int transfer(uint64_t sector, int write)
      * A pending notification closes the completion-before-wait race. */
     for (;;) {
         long bits;
-        if (sys_wait(events, &bits))
-            return -1;
+        if (stall && test_mode == BLK_TEST_STALL_NOISY) sys_notify(events, 2);
+        /* wait_until lets pending bits win. Enforce the request deadline
+         * independently so a flood of unrelated IRQs cannot postpone it. */
+        long r = sys_clock() >= deadline ? -ERR_TIMEDOUT :
+            sys_wait_until(events, deadline, &bits);
+        if (r == -ERR_TIMEDOUT) {
+            printf("disk request timed out; exiting for supervisor recovery\n");
+            /* Never reuse DMA buffers after an ambiguous completion.
+             * PCI keeps them pinned until root resets the device. */
+            sys_exit(BLK_EXIT_TIMEOUT);
+        }
+        if (r) sys_exit(BLK_EXIT_IO);
         (void)inb(base + 19);
-        if (sys_irq_ack(disk_irq))
-            return -1;
+        if (sys_irq_ack(disk_irq)) sys_exit(BLK_EXIT_IO);
         barrier();
         if (used[1] != completed)
             break;
     }
     volatile uint32_t *entry = (void *)&used[2 + 4u * (completed % qsize)];
-    if (used[1] != (uint16_t)(completed + 1) || entry[0] != 0)
-        return -1;
+    if (used[1] != (uint16_t)(completed + 1) || entry[0] != 0 || *status != 0)
+        sys_exit(BLK_EXIT_IO);
     completed++;
-    return *status == 0 ? 0 : -1;
+    return 0;
 }
 
 static int serve(uint64_t sectors)
@@ -203,7 +222,7 @@ static int serve(uint64_t sectors)
 
 int main(long arg)
 {
-    crash_on_read = arg != 0;
+    test_mode = arg;
     printf_use_console(CONSOLE);
     check_memory();
 
@@ -243,6 +262,7 @@ int main(long arg)
                        (uint64_t)inl((uint16_t)(ports + VIRTIO_BLK_CAPACITY + 4)) << 32;
     printf("disk: %lu sectors of 512 bytes (%lu KiB), features 0x%08x\n", sectors, sectors / 2,
            features);
+    capacity = sectors;
     check(sectors > 0, "read the disk's size from the device itself");
 
 

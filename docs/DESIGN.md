@@ -558,9 +558,9 @@ The root task stops the filesystem before the block server and PCI server.
 
 This is deliberately a single-file, read-only filesystem with no directory
 or write API. The driver supports QEMU's legacy port interface, queues of
-3..256 descriptors (power of two), and coherent x86 DMA. Device timeouts,
-read-only disks and hot unplug remain future work; normal operation requires
-a responsive writable disk. M9 adds pinned-buffer teardown during recovery.
+3..256 descriptors (power of two), and coherent x86 DMA. Read-only disks and hot unplug remain future work. Requests have one-second
+completion deadlines; a persistent device failure ends in explicit I/O errors.
+M9 adds pinned-buffer teardown during recovery.
 
 ## Drivers and modules
 
@@ -588,11 +588,12 @@ A never-started process can still be discarded without producing an exit.
 
 Root now waits on a shared child-exit notification, using one bit per
 manifest entry. It polls signalled children, counts completed applications,
-and allows one automatic restart of a faulted block server. Other unexpected
+and allows up to three automatic restarts of a faulted block server or one
+that exits with the designated I/O-failure/timeout code. Other unexpected
 server exits are errors. The restarted driver gets the same service endpoint
 and the same client badges, with a fresh process, quota and event notification.
 This keeps queued calls reachable without redistributing endpoint capabilities.
-The filesystem retries a transport `-ERR_DEAD` once; it remains the same process.
+The filesystem retries a transport `-ERR_DEAD` up to three times per read; it remains the same process.
 
 DMA memory must outlive a faulting driver. Before enabling its virtqueue the
 driver transfers a frame capability to the PCI server using `PCI_PIN_DMA`.
@@ -612,11 +613,46 @@ test verify that all frames return after shutdown, including pinned buffers
 and the old IRQ notification. Permission tests cover process observation,
 IRQ unbinding and supervisor-only device recovery.
 
+Completion waits use `wait_until(notification, absolute_tick)`. The timer
+tracks these waiters on a separate list, so a timeout can remove a thread
+from its notification FIFO without damaging either queue. Normal notification
+delivery disarms the timer. Both paths run with interrupts disabled, so a
+waiter wakes once. Pending bits take precedence over an expired deadline;
+errors leave the user's output bits unchanged. `clock()` exposes monotonic
+scheduler ticks at `CLOCK_HZ` (100 Hz), with a build-time frequency check.
+Using one absolute request deadline, checked independently of pending
+notification bits, prevents unrelated IRQs from extending it indefinitely. A timeout or invalid completion terminates the driver without
+reusing the potentially active frame; PCI retains it until supervisor reset.
+
+The restart budget applies across the whole boot, including failures on
+separate reads. Once exhausted, root still resets the device and releases
+its buffers, then receives on the stable block endpoint itself and replies
+`-ERR_IO`. Its bound child notification interrupts receive so it can keep
+supervising applications. This drains late or already queued retries without
+starting another driver. Applications report failure and the remaining
+servers shut down normally. Read retries are safe because the client-facing
+block API has no writes; ambiguous writes must not be retried blindly.
+
+Additional boot tests cover expired deadlines, real blocked expiration,
+pending-bit precedence, consumption and capability checks. `disk-timeout`
+suppresses a virtqueue kick to simulate a request with no completion.
+`driver-repeated` injects fault → timeout → fault on consecutive instances,
+then completes the file. `driver-exhausted` times out all four instances,
+with the last failure delayed to the second file sector so a new retry has
+no remaining restart budget. It verifies a terminal I/O reply, application
+failure, clean server shutdown and reclamation of all frames. `disk-boot-timeout`
+exercises a disk that never completes its startup probe: filesystem mounting
+fails, but the filesystem stays available to return I/O errors and accept
+shutdown, so the client can fail cleanly rather than queue indefinitely.
+`disk-noisy-timeout` injects a notification on every wait iteration to prove
+pending bits cannot postpone the request deadline. Fault injection
+does not emulate every possible hardware or interrupt-controller failure.
+
 Limits: this is bounded restart of this disk driver, not general capability
 revocation or arbitrary server supervision. PCI and the supervisor are trusted;
 recovery must not run while the old driver is alive. No IOMMU or protection
-against a malicious bus-mastering driver is provided. A device that never
-completes I/O still needs a timeout/watchdog policy.
+against a malicious bus-mastering driver is provided. A driver stuck in a CPU loop or an unrelated IPC call still needs an
+external watchdog; the deadline bounds the driver's completion wait only.
 
 ## Syscall ABI
 
@@ -660,6 +696,8 @@ object types and error codes live in `include/abi/syscall.h`.
 | 30 | `proc_watch(proc, ntfn, bits)` | register exit notification before start; READ process, WRITE notification |
 | 31 | `proc_poll(proc) -> code` | nonblocking status; `-ERR_AGAIN` while running, `-ERR_DEAD` after a fault |
 | 32 | `irq_unbind(irq)` | WRITE; mask and release the old notification |
+| 33 | `wait_until(ntfn, absolute_tick)` | notification wait with deadline; `-ERR_TIMEDOUT` on expiration |
+| 34 | `clock() -> ticks` | monotonic clock, `CLOCK_HZ` ticks per second |
 | later | `thread_create`, `cap_revoke` | future work |
 
 ## Milestones

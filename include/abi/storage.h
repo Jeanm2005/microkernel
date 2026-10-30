@@ -7,6 +7,7 @@
  * Both services accept PROTO_SHUTDOWN only from badge 0. */
 #pragma once
 #include <abi/proto.h>
+#include <abi/syscall.h>
 #define BLK_READ 1
 #define BLK_SIZE 2
 #define FS_STAT 1
@@ -15,3 +16,18 @@
 #define TINYFS_MAGIC 0x315346594e4954ull /* "TINYFS1" little endian */
 /* Sector 0: u64 magic, u64 file size, char name[24], then zero padding.
  * The single read-only file starts at sector 1. */
+
+/* System policy shared by supervisor and retrying filesystem. Repeated
+ * failure is bounded over this boot, rather than an infinite crash loop. */
+#define DISK_RESTART_LIMIT 3
+#define DISK_REQUEST_TICKS CLOCK_HZ /* one second, including spurious IRQs */
+#define BLK_EXIT_TIMEOUT 75
+#define BLK_EXIT_IO 74
+#define BLK_TEST_CRASH 1
+#define BLK_TEST_STALL 2
+
+#define BLK_TEST_STALL_LATE 3 /* time out after some file reads have succeeded */
+
+#define BLK_TEST_STALL_BOOT 4 /* no completion during the startup DMA probe */
+
+#define BLK_TEST_STALL_NOISY 5 /* spurious notification flood during a stalled request */

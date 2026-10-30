@@ -36,8 +36,10 @@ See [docs/DESIGN.md](docs/DESIGN.md) for the architecture and milestones.
   from disk
 
 - M9: the root task watches child exits and restarts a faulting disk
-  driver once, preserving its service endpoint and client badges; the PCI
-  server pins DMA memory until reset, and the filesystem retries its read
+  driver up to three times, preserving its service endpoint and client badges; the PCI
+  server pins DMA memory until reset, and the filesystem retries its read;
+  disk requests have one-second deadlines, with explicit I/O errors after
+  the restart budget is exhausted
 
 ## Build and run
 
@@ -56,6 +58,10 @@ make run CMDLINE="selftest=stack-overflow" # a thread overflows into its guard p
 make run CMDLINE="selftest=user-pagefault" # a user process crashes; the kernel survives
 make run CMDLINE="selftest=ipc-server-dies" # a server dies mid-call; its client gets -ERR_DEAD
 make run CMDLINE="selftest=app-crash"       # one application crashes; the system carries on
+make run CMDLINE="selftest=disk-timeout"   # a missing disk completion triggers recovery
+make run CMDLINE="selftest=driver-repeated" # fault, timeout, fault, then a successful read
+make run CMDLINE="selftest=disk-boot-timeout" # a disk unavailable from the first request
+make run CMDLINE="selftest=driver-exhausted" # repeated timeouts stop the service cleanly
 make run CMDLINE="selftest=driver-restart" # disk driver faults after submitting DMA; root restarts it
 make run CMDLINE="selftest=console-input"   # type a line and press Enter: it arrives by IRQ 4
 ```

@@ -254,3 +254,19 @@ static inline long sys_irq_unbind(long irq)
     long a[6] = { irq, 0, 0, 0, 0, 0 };
     return syscall6(SYS_IRQ_UNBIND, a);
 }
+
+/* Absolute tick deadlines prevent repeated unrelated wakeups from extending
+ * a device request forever. Pending notification bits win over expiration. */
+static inline unsigned long sys_clock(void)
+{
+    long a[6] = { 0 };
+    return (unsigned long)syscall6(SYS_CLOCK, a);
+}
+
+static inline long sys_wait_until(long ntfn, unsigned long deadline, long *bits)
+{
+    long a[6] = { ntfn, (long)deadline, 0, 0, 0, 0 };
+    long r = syscall6(SYS_WAIT_UNTIL, a);
+    if (!r) *bits = a[0];
+    return r;
+}

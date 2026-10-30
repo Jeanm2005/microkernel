@@ -27,6 +27,7 @@
 #include <abi/console.h>
 #include <abi/proto.h>
 #include <abi/pci.h>
+#include <abi/storage.h>
 #include <abi/selftest.h>
 #include "ipc.h"
 #include "root.h"
@@ -373,6 +374,23 @@ static void shut_down(struct program *p)
     }
 }
 
+/* Deterministic test plans. Ordinary manifests always restart with arg 0. */
+static long disk_test_arg(long mode, int restarts)
+{
+    switch (mode) {
+    case ROOT_MODE_INIT_BOOT_TIMEOUT: return BLK_TEST_STALL_BOOT;
+    case ROOT_MODE_INIT_EXHAUST:
+        return restarts == DISK_RESTART_LIMIT ? BLK_TEST_STALL_LATE : BLK_TEST_STALL;
+    case ROOT_MODE_INIT_TIMEOUT: return restarts ? 0 : BLK_TEST_STALL;
+    case ROOT_MODE_INIT_NOISY_TIMEOUT: return restarts ? 0 : BLK_TEST_STALL_NOISY;
+    case ROOT_MODE_INIT_RESTART: return restarts ? 0 : BLK_TEST_CRASH;
+    case ROOT_MODE_INIT_REPEATED:
+        if (restarts == 1) return BLK_TEST_STALL;
+        return restarts < DISK_RESTART_LIMIT ? BLK_TEST_CRASH : 0;
+    default: return 0;
+    }
+}
+
 int init_main(long mode)
 {
     const char *file = mode == ROOT_MODE_INIT_CRASH ? "crash.manifest"
@@ -388,6 +406,25 @@ int init_main(long mode)
     if (sys_module_read(mod, 0, manifest, size) != size || !parse_manifest(manifest))
         return 1;
     printf("read %s: %d programs\n", file, nprogs);
+
+    /* Deadline and pending-bit semantics on a private notification. */
+    long timer_test = sys_obj_create(ROOT_SLOT_FACTORY, OBJ_NOTIFICATION);
+    long timer_bits = 99;
+    unsigned long start = sys_clock();
+    check(timer_test > 0 && sys_wait_until(timer_test, start, &timer_bits) == -ERR_TIMEDOUT &&
+          timer_bits == 99, "an expired wait times out without changing output bits");
+    start = sys_clock();
+    check(sys_wait_until(timer_test, start + 2, &timer_bits) == -ERR_TIMEDOUT &&
+          sys_clock() - start >= 2, "a blocked notification wait expires at its deadline");
+    check(sys_notify(timer_test, 5) == 0 && sys_wait_until(timer_test, 0, &timer_bits) == 0 &&
+          timer_bits == 5 && sys_wait_until(timer_test, 0, &timer_bits) == -ERR_TIMEDOUT,
+          "pending notification bits win over expiration and are consumed once");
+    long write_timer = sys_cap_copy(timer_test, CAP_WRITE, 0);
+    check(sys_wait_until(write_timer, 0, &timer_bits) == -ERR_PERM &&
+          sys_wait_until(0, 0, &timer_bits) == -ERR_BADCAP,
+          "timed waits check notification capabilities before deadlines");
+    sys_cap_delete(write_timer);
+    sys_cap_delete(timer_test);
 
     /* Our own authority has limits too. */
     child_events = sys_obj_create(ROOT_SLOT_FACTORY, OBJ_NOTIFICATION);
@@ -434,10 +471,12 @@ int init_main(long mode)
         if (!create(&progs[i], &next_badge))
             return 1;
 
-    if (mode == ROOT_MODE_INIT_RESTART) {
+    if (mode == ROOT_MODE_INIT_RESTART || mode == ROOT_MODE_INIT_TIMEOUT ||
+        mode == ROOT_MODE_INIT_REPEATED || mode == ROOT_MODE_INIT_EXHAUST ||
+        mode == ROOT_MODE_INIT_BOOT_TIMEOUT || mode == ROOT_MODE_INIT_NOISY_TIMEOUT) {
         struct program *disk = provider("blk");
         if (!disk) return 1;
-        disk->arg = 1; /* only its first instance injects a fault */
+        disk->arg = disk_test_arg(mode, 0);
     }
 
     /* Everything we start runs below our priority, so nothing runs until
@@ -460,11 +499,24 @@ int init_main(long mode)
         printf("output now goes through the console server\n");
     }
 
+    long unavailable_ep = 0;
     int pending = 0;
     for (int i = 0; i < nprogs; i++) if (!progs[i].provides) pending++;
     while (pending) {
         long bits;
-        if (sys_wait(child_events, &bits)) return 1;
+        if (unavailable_ep) {
+            struct msg request;
+            long status = sys_recv(unavailable_ep, &request);
+            if (!status) {
+                if (request.cap > 0) sys_cap_delete(request.cap);
+                long reply[4] = { -ERR_IO, 0, 0, 0 };
+                printf("disk service unavailable; refusing request\n");
+                if (sys_reply(reply, 0)) return 1;
+                continue;
+            }
+            if (status != IPC_NOTIFIED) return 1;
+            bits = request.w[0];
+        } else if (sys_wait(child_events, &bits)) return 1;
         for (int i = 0; i < nprogs; i++) {
             struct program *p = &progs[i];
             if (p->finished || !(bits & (1ul << i))) continue;
@@ -473,11 +525,16 @@ int init_main(long mode)
             if (p->provides) {
                 /* This milestone supervises the disk driver. Other server
                  * failures are reported, rather than restarted blindly. */
-                if (r != -ERR_DEAD || strcmp(p->provides, "blk") || p->restarts) {
+                bool recoverable = r == -ERR_DEAD ||
+                    (r == 0 && (code == BLK_EXIT_TIMEOUT || code == BLK_EXIT_IO));
+                if (!recoverable || strcmp(p->provides, "blk")) {
                     printf("FAILED: unexpected server exit: %s\n", p->name);
                     return 1;
                 }
-                printf("observed disk driver fault after process teardown\n");
+                if (r == -ERR_DEAD)
+                    printf("observed disk driver fault after process teardown\n");
+                else
+                    printf("observed disk driver I/O failure after process teardown\n");
                 struct program *pc = provider("pci");
                 struct msg m = { .w = { PCI_FIND,
                     PCI_VENDOR_VIRTIO << 16 | PCI_DEVICE_VIRTIO_BLK } };
@@ -486,8 +543,18 @@ int init_main(long mode)
                 if (sys_call(pc->ep, &m, 0) || m.w[0]) return 1;
                 printf("stopped disk DMA and released its old buffers\n");
                 if (sys_cap_delete(p->proc)) return 1;
+                if (p->restarts == DISK_RESTART_LIMIT) {
+                    printf("disk restart budget exhausted; stopping the service\n");
+                    p->finished = true;
+                    failures++;
+                    /* Root now drains the stable endpoint with terminal
+                     * errors, alongside child-exit notifications. */
+                    unavailable_ep = p->ep;
+                    if (sys_ntfn_bind(child_events)) return 1;
+                    continue;
+                }
                 p->restarts++;
-                p->arg = 0;
+                p->arg = disk_test_arg(mode, p->restarts);
                 if (!create(p, &next_badge) || sys_proc_start(p->proc, p->arg)) return 1;
                 printf("restarted blk with the same endpoint and client badges\n");
             } else {
@@ -506,9 +573,18 @@ int init_main(long mode)
     if (mode == ROOT_MODE_INIT_RESTART)
         check(provider("blk")->restarts == 1, "disk driver restarted exactly once");
 
+    if (mode == ROOT_MODE_INIT_REPEATED)
+        check(provider("blk")->restarts == DISK_RESTART_LIMIT,
+              "disk survived three successive recoveries");
+    if (mode == ROOT_MODE_INIT_TIMEOUT || mode == ROOT_MODE_INIT_NOISY_TIMEOUT)
+        check(provider("blk")->restarts == 1, "disk timeout recovered with one restart");
+    if (mode == ROOT_MODE_INIT_EXHAUST || mode == ROOT_MODE_INIT_BOOT_TIMEOUT)
+        check(provider("blk")->restarts == DISK_RESTART_LIMIT && provider("blk")->finished,
+              "restart exhaustion stopped DMA without starting another driver");
+
     printf_use_console(0);   /* the console is about to go away */
     for (int i = nprogs - 1; i >= 0; i--)
-        if (progs[i].provides)
+        if (progs[i].provides && !progs[i].finished)
             shut_down(&progs[i]);
 
     printf("system finished, %d failure(s)\n", failures);
