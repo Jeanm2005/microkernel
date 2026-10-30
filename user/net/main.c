@@ -89,7 +89,7 @@ int main(long count)
 {
     printf_use_console(SLOT_USES);
     long addr = pci(PCI_FIND, PCI_VENDOR_VIRTIO << 16 | PCI_DEVICE_VIRTIO_NET, 0);
-    if (count < 1 || count > 1000 || addr < 0 || pci(PCI_CLAIM, addr, 0)) return 1;
+    if (count < 0 || count > 1000 || addr < 0 || pci(PCI_CLAIM, addr, 0)) return 1;
     long port_cap, irq_cap;
     long ports = pci(PCI_BAR, addr, &port_cap);
     long line = pci(PCI_IRQ, addr, &irq_cap);
@@ -125,13 +125,19 @@ int main(long count)
     barrier(); outb(base + 18, 7); outw(base + 16, 0);
     printf("ready: 10.0.2.15, MAC %02x:%02x:%02x:%02x:%02x:%02x, IRQ %ld\n",
            mac[0],mac[1],mac[2],mac[3],mac[4],mac[5],line);
-    unsigned long deadline = sys_clock() + 10 * CLOCK_HZ;
+    net_reset();
+    unsigned long deadline = sys_clock() + 30 * CLOCK_HZ;
     unsigned received = 0, dropped = 0;
     long echoes = 0;
-    while (echoes < count) {
+    while (!count || echoes < count) {
+        unsigned long now = sys_clock();
+        if (count && now >= deadline) goto fail;
+        size_t timer_reply = net_poll(reply, now);
+        if (timer_reply && send_packet(timer_reply)) goto fail;
         barrier();
         if (rx.used[1] == rx.completed) {
-            if (sys_clock() >= deadline || wait_irq(deadline)) goto fail;
+            long r = wait_irq(sys_clock() + CLOCK_HZ / 10);
+            if (r && r != -ERR_TIMEDOUT) goto fail;
             continue;
         }
         if ((uint16_t)(rx.used[1] - rx.completed) > RX_BUFFERS) goto fail;
@@ -141,7 +147,7 @@ int main(long count)
         int echo;
         uint8_t *buf = buffer(id / 2);
         /* No receive offload features were negotiated. */
-        size_t n = buf[0] || buf[1] ? 0 : net_reply(buf + HEADER, len - HEADER, reply, mac, &echo);
+        size_t n = buf[0] || buf[1] ? 0 : net_reply(buf + HEADER, len - HEADER, reply, mac, &echo, now);
         received++;
         if (n) {
             if (send_packet(n)) goto fail;

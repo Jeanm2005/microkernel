@@ -14,3 +14,5 @@
  int64_t sys_proc_wait(struct cspace *cs, int64_t proc, uint64_t *code);
 int64_t sys_proc_watch(struct cspace *cs, int64_t proc, int64_t ntfn, uint64_t bits);
 int64_t sys_proc_poll(struct cspace *cs, int64_t proc, uint64_t *code);
+
+int64_t sys_proc_watchdog(struct cspace *cs, int64_t proc, uint64_t ticks);

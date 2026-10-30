@@ -174,3 +174,16 @@ int64_t sys_proc_poll(struct cspace *cs, int64_t proc, uint64_t *code)
     *code = (uint64_t)(int64_t)p->exit_code;
     return 0;
 }
+
+int64_t sys_proc_watchdog(struct cspace *cs, int64_t proc, uint64_t ticks)
+{
+    struct process *p;
+    int64_t err = lookup_proc(cs, proc, CAP_WRITE, &p);
+    if (err) return err;
+    if (ticks > 60 * SCHED_HZ) return -ERR_INVAL;
+    uint64_t flags = irq_save();
+    if (p->started) { irq_restore(flags); return -ERR_INVAL; }
+    p->watchdog_ticks = ticks;
+    irq_restore(flags);
+    return 0;
+}

@@ -7,7 +7,7 @@ can crash and be restarted without taking the system down.
 
 See [docs/DESIGN.md](docs/DESIGN.md) for the architecture and milestones.
 
-**Status:** M0–M10 demo acceptance tests complete. Networking currently supports ARP and IPv4/ICMP ping.
+**Status:** M0–M10 demo acceptance tests complete. Networking now includes persistent UDP/TCP echo services alongside ARP and IPv4/ICMP.
 
 - M0: boots via Limine on QEMU, serial console, memory map
 - M1: own GDT (Global Descriptor Table), TSS (Task State Segment) and IDT
@@ -42,8 +42,7 @@ See [docs/DESIGN.md](docs/DESIGN.md) for the architecture and milestones.
 
 - M10: a user-space virtio-net driver and minimal IP stack answer ARP and
   ICMP echo at `10.0.2.15`; the host validates 260 pings, malformed packet
-  rejection, virtqueue reuse and complete memory reclamation. TCP/UDP
-  transports, DHCP and routing are future work.
+  rejection, virtqueue reuse and complete memory reclamation.
 
 ## Build and run
 
@@ -53,7 +52,9 @@ Requirements: `python3`, `gcc`, `binutils`, `make`, `git`, `xorriso`, `qemu-syst
 ```sh
 make run     # build ISO and boot in QEMU, serial output in the terminal (Ctrl+C to quit)
 make test    # boot regression cases, then run the host-to-guest network test
-make net-demo # ping the guest over a local Ethernet socket pair; no TAP/root needed
+make net-demo # ARP, ping, UDP and TCP packet tests over a local socket pair
+make net-serve # persistent guest: TCP localhost:2222 and UDP localhost:2223
+make net-sockets-test # native host TCP/UDP clients against the persistent guest
 make debug   # QEMU waits for GDB: gdb build/kernel.elf -ex 'target remote :1234'
 
 make run CMDLINE="selftest=pagefault"     # watch a page-fault report
@@ -84,3 +85,32 @@ uses a Python ICMP peer on QEMU's Ethernet socket backend; it needs no
 Internet connection, TAP interface, or privileged host `ping` socket. See
 [docs/DESIGN.md](docs/DESIGN.md#networking-m10) for the supported protocols
 and current limits.
+
+## Functional networking and hardening
+
+`make net-serve` keeps the guest running and forwards **TCP port 2222** and
+**UDP port 2223** on host loopback to the guest's echo port 7. For example,
+in another terminal:
+
+```sh
+python3 -c 'import socket; s=socket.create_connection(("127.0.0.1",2222)); s.sendall(b"hello guest\n"); print(s.recv(1024).decode(),end=""); s.close()'
+python3 -c 'import socket; s=socket.socket(socket.AF_INET,socket.SOCK_DGRAM); s.settimeout(2); s.sendto(b"hello UDP",("127.0.0.1",2223)); print(s.recv(1024)); s.close()'
+```
+
+TCP supports passive connections, bounded concurrent state, binary streams,
+retransmission, duplicate detection, sequence wrap and passive FIN close.
+UDP preserves datagram boundaries and validates lengths and checksums.
+These are fixed echo services, not a POSIX socket API for guest programs.
+The stack deliberately uses one outstanding TCP segment per connection;
+active connects, general application sockets and a full TCP congestion-control
+implementation remain future work.
+
+The supervisor now configures a two-second CPU watchdog for the disk and
+network drivers. A driver spinning in user space without syscalls is killed
+at a safe user boundary; disk recovery resets DMA before restarting it.
+Blocked IPC and kernel execution are outside this CPU watchdog's scope.
+`make test` includes sanitizer checks of truncated/mutated packets, 21 boot
+cases (including `selftest=driver-watchdog`), packet-level loss/reorder tests,
+and native host TCP/UDP socket tests. LeakSanitizer needs an environment
+that permits process inspection (run outside a debugger/restrictive sandbox).
+See [the design](docs/DESIGN.md) for current limits and follow-up priorities.

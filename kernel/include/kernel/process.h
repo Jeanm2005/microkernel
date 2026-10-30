@@ -32,6 +32,7 @@ struct process {
     uint64_t       entry;          /* first user instruction */
     uint64_t       arg;            /* passed to the program in rdi */
 
+    uint64_t watchdog_ticks, watchdog_deadline; /* userspace CPU watchdog */
     bool           started;        /* process_start() has run */
     bool           may_debug_write; /* only processes the kernel itself started */
 
@@ -100,3 +101,6 @@ int64_t process_debug_write(uint64_t user_buf, uint64_t len);
  * accessible (writable, for copy_to_user). */
 int64_t copy_to_user(uint64_t dst, const void *src, uint64_t len);
 int64_t copy_from_user(void *dst, uint64_t src, uint64_t len);
+void process_watchdog_check(void);
+void process_watchdog_pause(void);
+void process_watchdog_resume(void);

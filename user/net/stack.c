@@ -2,28 +2,12 @@
  * Parse bytes explicitly: packet alignment and host byte order are irrelevant. */
 #include "stack.h"
 #include "ulib.h"
-static unsigned be16(const uint8_t *p) { return (unsigned)p[0] << 8 | p[1]; }
-static uint32_t be32(const uint8_t *p)
-{
-    return (uint32_t)be16(p) << 16 | be16(p + 2);
-}
-static void put16(uint8_t *p, unsigned n) { p[0] = n >> 8; p[1] = n; }
-static void put32(uint8_t *p, uint32_t n) { put16(p, n >> 16); put16(p + 2, n); }
-static int equal(const uint8_t *a, const uint8_t *b, size_t n)
-{
-    for (size_t i = 0; i < n; i++) if (a[i] != b[i]) return 0;
-    return 1;
-}
-static unsigned checksum(const uint8_t *p, size_t len)
-{
-    unsigned sum = 0;
-    while (len >= 2) { sum += be16(p); p += 2; len -= 2; }
-    if (len) sum += (unsigned)*p << 8;
-    while (sum >> 16) sum = (sum & 0xffff) + (sum >> 16);
-    return (~sum) & 0xffff;
-}
+#include "wire.h"
+#include "tcp.h"
+void net_reset(void) { tcp_reset(); }
+size_t net_poll(uint8_t *out, uint64_t now) { return tcp_poll(out, now); }
 size_t net_reply(const uint8_t *in, size_t len, uint8_t *out,
-                 const uint8_t mac[6], int *echo)
+                 const uint8_t mac[6], int *echo, uint64_t now)
 {
     static const uint8_t broadcast[6] = {255,255,255,255,255,255};
     *echo = 0;
@@ -50,9 +34,26 @@ size_t net_reply(const uint8_t *in, size_t len, uint8_t *out,
      * non-unicast sources, wrong destinations and bad checksums. */
     uint32_t source = be32(ip + 12);
     if (ip[0] != 0x45 || total < hlen + 8 || total > len - 14 || total > NET_MTU ||
-        (be16(ip + 6) & 0xbfff) || !ip[8] || ip[9] != 1 ||
+        (be16(ip + 6) & 0xbfff) || !ip[8] ||
         !source || source == 0xffffffff || (source >> 24) >= 224 ||
         be32(ip + 16) != NET_IP || checksum(ip, hlen)) return 0;
+    if (ip[9] == 6) return tcp_reply(in, total, out, mac, now);
+    if (ip[9] == 17) {
+        const uint8_t *udp = ip + 20;
+        size_t n = total - 20;
+        if (be16(udp + 2) != NET_ECHO_PORT || !be16(udp) || be16(udp + 4) != n ||
+            (be16(udp + 6) && transport_checksum(ip, n))) return 0;
+        size_t size = 14 + total;
+        memset(out, 0, size < 60 ? 60 : size);
+        ip_header(out, in + 6, mac, source, 17, n);
+        memcpy(out + 34, udp, n);
+        put16(out + 34, NET_ECHO_PORT); put16(out + 36, be16(udp));
+        put16(out + 40, 0);
+        unsigned sum = transport_checksum(out + 14, n);
+        put16(out + 40, sum ? sum : 0xffff);
+        return size < 60 ? 60 : size;
+    }
+    if (ip[9] != 1) return 0;
     const uint8_t *icmp = ip + hlen;
     if (icmp[0] != 8 || icmp[1] != 0 || checksum(icmp, total - hlen)) return 0;
     size_t size = 14 + total;

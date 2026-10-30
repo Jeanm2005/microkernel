@@ -276,6 +276,8 @@ static bool create(struct program *p, long *next_badge)
         printf("FAILED: watching %s\n", p->name);
         return false;
     }
+    if ((!strcmp(p->name, "blk") || !strcmp(p->name, "net")) &&
+        sys_proc_watchdog(p->proc, 2 * CLOCK_HZ)) return false;
     /* The server may receive on its endpoint and accept capabilities. */
     if (p->ep) {
         long r = sys_proc_give(p->proc, p->ep, SLOT_SERVE, CAP_READ | CAP_GRANT, 0);
@@ -381,6 +383,7 @@ static long disk_test_arg(long mode, int restarts)
     case ROOT_MODE_INIT_BOOT_TIMEOUT: return BLK_TEST_STALL_BOOT;
     case ROOT_MODE_INIT_EXHAUST:
         return restarts == DISK_RESTART_LIMIT ? BLK_TEST_STALL_LATE : BLK_TEST_STALL;
+    case ROOT_MODE_WATCHDOG: return restarts ? 0 : BLK_TEST_SPIN;
     case ROOT_MODE_INIT_TIMEOUT: return restarts ? 0 : BLK_TEST_STALL;
     case ROOT_MODE_INIT_NOISY_TIMEOUT: return restarts ? 0 : BLK_TEST_STALL_NOISY;
     case ROOT_MODE_INIT_RESTART: return restarts ? 0 : BLK_TEST_CRASH;
@@ -395,7 +398,7 @@ int init_main(long mode)
 {
     const char *file = mode == ROOT_MODE_INIT_CRASH ? "crash.manifest"
                      : mode == ROOT_MODE_INIT_INPUT ? "input.manifest"
-                     : mode == ROOT_MODE_INIT_NET ? "net.manifest"
+                     : (mode == ROOT_MODE_INIT_NET || mode == ROOT_MODE_NET_SERVE) ? "net.manifest"
                      : "system.manifest";
     find_modules();
     long mod = module_slot(file);
@@ -444,6 +447,12 @@ int init_main(long mode)
           sys_proc_watch(write_proc, child_events, 1) == -ERR_PERM,
           "observing process exit requires a readable process capability");
     sys_cap_delete(write_proc);
+    long read_proc = sys_cap_copy(unused, CAP_READ, 0);
+    check(read_proc > 0 && sys_proc_watchdog(read_proc, 200) == -ERR_PERM &&
+          sys_proc_watchdog(unused, 6001) == -ERR_INVAL &&
+          sys_proc_watchdog(unused, 200) == 0,
+          "CPU watchdog configuration requires process write rights and bounded ticks");
+    sys_cap_delete(read_proc);
     long ro_events = sys_cap_copy(child_events, CAP_READ, 0);
     check(unused > 0 && sys_proc_watch(unused, child_events, 0) == -ERR_INVAL &&
           sys_proc_watch(unused, ro_events, 1) == -ERR_PERM &&
@@ -474,18 +483,23 @@ int init_main(long mode)
 
     if (mode == ROOT_MODE_INIT_RESTART || mode == ROOT_MODE_INIT_TIMEOUT ||
         mode == ROOT_MODE_INIT_REPEATED || mode == ROOT_MODE_INIT_EXHAUST ||
-        mode == ROOT_MODE_INIT_BOOT_TIMEOUT || mode == ROOT_MODE_INIT_NOISY_TIMEOUT) {
+        mode == ROOT_MODE_INIT_BOOT_TIMEOUT || mode == ROOT_MODE_INIT_NOISY_TIMEOUT || mode == ROOT_MODE_WATCHDOG) {
         struct program *disk = provider("blk");
         if (!disk) return 1;
         disk->arg = disk_test_arg(mode, 0);
     }
+
+    if (mode == ROOT_MODE_NET_SERVE)
+        for (int i = 0; i < nprogs; i++)
+            if (!strcmp(progs[i].name, "net")) progs[i].arg = 0;
 
     /* Everything we start runs below our priority, so nothing runs until
      * we block waiting below. */
     for (int i = 0; i < nprogs; i++) {
         sys_proc_start(progs[i].proc, progs[i].arg);
         check(sys_proc_poll(progs[i].proc, &code) == -ERR_AGAIN &&
-              sys_proc_watch(progs[i].proc, child_events, 1) == -ERR_INVAL,
+              sys_proc_watch(progs[i].proc, child_events, 1) == -ERR_INVAL &&
+              sys_proc_watchdog(progs[i].proc, 1) == -ERR_INVAL,
               "a running child polls as pending and cannot change its watch");
         printf("started %s (priority %ld)\n", progs[i].name, progs[i].priority);
     }
@@ -571,7 +585,7 @@ int init_main(long mode)
             }
         }
     }
-    if (mode == ROOT_MODE_INIT_RESTART)
+    if (mode == ROOT_MODE_INIT_RESTART || mode == ROOT_MODE_WATCHDOG)
         check(provider("blk")->restarts == 1, "disk driver restarted exactly once");
 
     if (mode == ROOT_MODE_INIT_REPEATED)

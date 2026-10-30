@@ -31,3 +31,5 @@
 #define BLK_TEST_STALL_BOOT 4 /* no completion during the startup DMA probe */
 
 #define BLK_TEST_STALL_NOISY 5 /* spurious notification flood during a stalled request */
+
+#define BLK_TEST_SPIN 6 /* spin after DMA submission; only the CPU watchdog can stop it */

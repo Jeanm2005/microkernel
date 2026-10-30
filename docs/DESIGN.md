@@ -649,12 +649,17 @@ shutdown, so the client can fail cleanly rather than queue indefinitely.
 `disk-noisy-timeout` injects a notification on every wait iteration to prove
 pending bits cannot postpone the request deadline. Fault injection
 does not emulate every possible hardware or interrupt-controller failure.
+Stall injection also ignores a racing completion from queue activation;
+otherwise the supposedly stalled startup read could reach a scratch write
+before timing out. The write self-test reads back its restored sector, and
+the host checks the whole disk image hash after each boot case.
 
 Limits: this is bounded restart of this disk driver, not general capability
 revocation or arbitrary server supervision. PCI and the supervisor are trusted;
 recovery must not run while the old driver is alive. No IOMMU or protection
-against a malicious bus-mastering driver is provided. A driver stuck in a CPU loop or an unrelated IPC call still needs an
-external watchdog; the deadline bounds the driver's completion wait only.
+against a malicious bus-mastering driver is provided. The CPU watchdog below covers a driver spinning without syscalls. A driver
+blocked in unrelated IPC or kernel code still needs cancellation/watchdog
+mechanisms beyond the disk-completion deadline.
 
 ## Networking (M10)
 
@@ -671,7 +676,8 @@ merged buffers are accepted. Each descriptor chain separates the 10-byte
 legacy network header from the Ethernet payload, as required without
 ANY_LAYOUT. Sixteen RX chains are posted and recycled after processing;
 TX permits one outstanding chain and waits up to one second for completion.
-Receive waits have a ten-second overall demo deadline. Queue memory and
+The finite demo has a thirty-second overall deadline; persistent service
+mode has no demo deadline. Ten-tick notification waits also drive TCP timers. Queue memory and
 all packet buffers occupy one contiguous, zeroed frame within the driver's
 32-page quota. The used indices, IDs and lengths are checked before accessing
 buffers. Both normal and failed exits reset the NIC before teardown; PCI
@@ -684,20 +690,22 @@ Ethernet destinations, ARP layout and sender addresses, IP and ICMP checksums,
 packet lengths, TTL, protocol, fragment flags and destination IP. Echo replies
 preserve identifier, sequence and payload and recalculate checksums; minimum
 Ethernet frames are zero padded. Unsupported or malformed frames are dropped.
-This is the ping subset of the planned TCP/IP suite: TCP, UDP, sockets,
-DHCP, DNS, IPv6, IP options, fragmentation/reassembly and routing are not
-implemented. Driver and stack share one process in this milestone.
+UDP and TCP echo services were added after the ping milestone (see below).
+DHCP, DNS, IPv6, IP options, fragmentation/reassembly and routing remain
+unimplemented. Driver and stack currently share one process.
 
 `make net-demo` builds a network-test ISO and runs `scripts/net-test.py`.
 Python and QEMU share a local stream socket pair, carrying length-prefixed
 Ethernet frames; no Internet, TAP setup or raw-socket privileges are needed.
-The host sends ARP, validates the exact reply, sends nine malformed or
-unsupported frames, and then checks 260 ICMP replies byte for byte. Payloads
+The host sends ARP, validates the exact reply, rejects malformed frames,
+exercises UDP and TCP (including lost replies and connection exhaustion),
+and then checks 260 ICMP replies byte for byte. Payloads
 include zero bytes, odd lengths and the MTU limit. The run reuses all RX
 buffers and crosses the 256-entry ring positions. The guest exits after
 260 echo replies; root shuts down PCI and console, and the kernel checks
 that every frame was reclaimed. `make test` runs this after the existing
-20 boot regressions. Logs are in `build/net-demo.log`. This peer is a small
+21 boot regressions and sanitizer tests, followed by native socket tests.
+Logs are in `build/net-demo.log` and `build/net-sockets.log`. This peer is a small
 host ping implementation, not the host OS's `ping` command.
 
 The driver layout follows the
@@ -708,6 +716,81 @@ A TAP backend could connect the same packets to a host network, but this
 demo does not configure one. The legacy PIC path cannot share an IRQ between
 independent drivers, so simultaneous disk/NIC use needs distinct interrupt
 lines or future interrupt-routing support.
+
+## Practical transport services and hardening
+
+`make net-serve` selects `selftest=net-serve` and starts the network program
+with count 0, meaning persistent service. It uses the same static IPv4
+address, with QEMU user networking forwarding host loopback TCP 2222 and
+UDP 2223 to guest port 7. The finite `net-demo` mode still exits after its
+ping count to verify teardown and DMA frame reclamation.
+
+UDP validates the pseudo-header checksum, datagram length and port, accepts
+the IPv4 zero-checksum convention, and generates a nonzero response checksum.
+The echo preserves complete datagrams, including empty and MTU-sized ones.
+Unsupported UDP ports are dropped. This follows
+[RFC 768](https://www.rfc-editor.org/rfc/rfc768).
+
+TCP in `user/net/tcp.c` implements a passive echo listener: SYN/SYN-ACK/ACK,
+stream echo, FIN half-close and reset processing. A fixed four-entry table
+bounds allocation under connection floods; each entry caches at most one
+unacknowledged segment. MSS negotiation and the peer's advertised window
+bound each echo. The receive window closes while the echo is unacknowledged,
+then a window update allows more data. Sequence comparisons are modular;
+duplicates are trimmed and out-of-order bytes are acknowledged without
+being queued. Invalid checksums, header/options lengths, ACKs beyond sent
+sequence space and inexact RSTs cannot advance/destroy connection state.
+Closed TCP ports return reset segments.
+
+Timer polling retransmits SYN-ACK, echo data and FIN, with exponential
+backoff, a bounded retry count and thirty-second idle cleanup. Connections
+that stall are reset and their slots reclaimed. Peer FIN may be held while
+the last echo is acknowledged. These mechanisms follow the relevant packet
+and sequence rules in [RFC 9293](https://www.rfc-editor.org/rfc/rfc9293), but
+this deliberately small implementation is **not a complete conforming TCP**:
+there is no active open, general guest socket API, receive reassembly queue,
+SACK, timestamps, window scaling, urgent-data support, dynamic RTT estimator,
+persist probing, or full congestion control. One outstanding segment per
+connection limits throughput; this is intended for the local functional
+services, not public Internet exposure. Initial sequence numbers are not
+cryptographically unpredictable.
+
+`make net-sockets-test` uses the host OS's real TCP/UDP sockets through QEMU
+user networking, checks binary streams of more than 32 KiB over three
+concurrent sessions, performs half-closes, and verifies continued service
+past the old ten-second demo lifetime. The packet-level harness separately
+checks loss/retransmission of SYN-ACK, data and FIN, duplicates, out-of-order
+segments, sequence wrap, invalid ACK/RST behavior and table exhaustion.
+`make net-stack-test` uses ASan, UBSan and LeakSanitizer to exercise exact
+truncated allocation boundaries and 20,000 deterministic mutations, plus
+virtual-clock retransmission/idle expiration. The finite QEMU demo verifies
+full frame reclamation; the native persistent-service test ends by stopping
+QEMU after functional checks rather than claiming guest teardown.
+
+A supervisor may call `proc_watchdog(proc, ticks)` before start, with WRITE
+on the process, to bound continuous userspace execution between syscalls.
+Zero disables it; the maximum is sixty seconds. The default manifests arm
+a two-second watchdog on disk and network driver processes. Syscall entry
+checks the budget, pauses it during kernel execution/blocking, and starts
+a fresh budget on return to user mode. The budget uses the thread's own
+scheduled tick count, so preemption by another process cannot consume it.
+Timer interrupts from ring 3 check
+the same deadline and kill an expired process through ordinary process
+teardown. A preempted kernel stack is never discarded midway through IPC
+or allocation. `selftest=driver-watchdog` spins after disk DMA submission;
+root observes the kill, resets the device, releases the pinned frame,
+restarts the driver and completes the filesystem read without leaks.
+
+This watchdog does not cancel a process stuck inside IPC or kernel code,
+and a process making frequent syscalls can satisfy it without useful work.
+Networking faults are currently reported as application failures rather
+than automatically restarted; disk supervision still has its bounded restart
+policy. General capability revocation and SMP have not been implemented.
+
+Next practical priorities are a guest-facing socket IPC API and an application
+using it, network-service restart/reconnect, cancellable/timed IPC for blocked
+server watchdogs, then capability revocation and shared IRQ routing. These
+are follow-up work, not marked complete by the transport and watchdog tests.
 
 ## Syscall ABI
 
@@ -753,6 +836,7 @@ object types and error codes live in `include/abi/syscall.h`.
 | 32 | `irq_unbind(irq)` | WRITE; mask and release the old notification |
 | 33 | `wait_until(ntfn, absolute_tick)` | notification wait with deadline; `-ERR_TIMEDOUT` on expiration |
 | 34 | `clock() -> ticks` | monotonic clock, `CLOCK_HZ` ticks per second |
+| 35 | `proc_watchdog(proc, ticks)` | WRITE; configure continuous user run budget before start, 0 disables |
 | later | `thread_create`, `cap_revoke` | future work |
 
 ## Milestones
@@ -770,7 +854,7 @@ object types and error codes live in `include/abi/syscall.h`.
 | **M8a** | Memory capabilities + PCI server | a driver gets a frame from its own quota and maps it; the PCI server hands it exactly its disk's ports and IRQ; it reads the disk's size from the device ✅ |
 | **M8b** | virtio-blk driver + tiny FS server | `cat` prints `hello.txt` from disk; DMA read/write, IRQ completion and leak checks pass ✅ |
 | **M9** | Fault supervision + restart | disk driver faults after DMA submission; root resets and restarts it, filesystem retries, `cat` finishes, no frames leak ✅ |
-| **M10** | virtio-net + minimal user-space IP stack (ping subset) | host resolves ARP and validates 260 guest echo replies, malformed frames are dropped, and no frames leak ✅; TCP/UDP remain future work |
+| **M10** | virtio-net + minimal user-space IP stack (ping subset) | host resolves ARP and validates 260 guest echo replies, malformed frames are dropped, and no frames leak ✅; UDP/TCP echo transports subsequently added (see limitations above) |
 
 #PF = page fault, #DF = double fault.
 

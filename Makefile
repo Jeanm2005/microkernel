@@ -70,7 +70,7 @@ QEMUFLAGS := -M q35 -m 256M -cpu qemu64 -smp 1 -no-reboot \
              -drive file=$(DISK),if=none,id=disk0,format=raw \
              -device virtio-blk-pci,drive=disk0,disable-legacy=off
 
-.PHONY: all iso run debug test net-demo clean FORCE
+.PHONY: all iso run debug test net-demo net-serve net-sockets-test net-stack-test clean FORCE
 # The user_prog rules above come first, so name the default goal explicitly.
 .DEFAULT_GOAL := all
 
@@ -133,13 +133,31 @@ run: iso $(DISK)
 debug: iso $(DISK)
 	$(QEMU) $(QEMUFLAGS) -cdrom $(ISO) -s -S
 
-test: all limine/limine $(DISK)
+test: all limine/limine $(DISK) net-stack-test
 	@QEMU="$(QEMU)" QEMUFLAGS="$(QEMUFLAGS)" BUILD="$(BUILD)" sh scripts/test.sh
 	$(MAKE) net-demo
+	$(MAKE) net-sockets-test
 
 net-demo: all limine/limine $(DISK)
 	$(MAKE) -s iso ISO=$(BUILD)/net.iso CMDLINE=selftest=net-ping
 	python3 scripts/net-test.py --qemu $(QEMU) --iso $(BUILD)/net.iso --disk $(DISK) --log $(BUILD)/net-demo.log
+
+net-stack-test:
+	@mkdir -p $(BUILD)/tests
+	$(CC) -std=gnu11 -g -O1 -Wall -Wextra -Werror -fsanitize=address,undefined \
+	    -Iuser/net -Iuser/lib tests/NetStackTests.c user/net/stack.c user/net/tcp.c -o $(BUILD)/tests/net-stack
+	ASAN_OPTIONS=detect_leaks=1 $(BUILD)/tests/net-stack
+
+net-sockets-test: all limine/limine $(DISK)
+	$(MAKE) -s iso ISO=$(BUILD)/net-serve.iso CMDLINE=selftest=net-serve
+	python3 scripts/net-sockets-test.py --qemu $(QEMU) --iso $(BUILD)/net-serve.iso --disk $(DISK) --log $(BUILD)/net-sockets.log
+
+# Persistent local services, reachable with ordinary host TCP/UDP sockets.
+net-serve: all limine/limine $(DISK)
+	$(MAKE) -s iso ISO=$(BUILD)/net-serve.iso CMDLINE=selftest=net-serve
+	$(QEMU) $(QEMUFLAGS) -cdrom $(BUILD)/net-serve.iso \
+	    -netdev user,id=net0,hostfwd=tcp:127.0.0.1:2222-:7,hostfwd=udp:127.0.0.1:2223-:7 \
+	    -device virtio-net-pci,netdev=net0,disable-modern=on,mac=52:54:00:12:34:56
 
 clean:
 	rm -rf $(BUILD)

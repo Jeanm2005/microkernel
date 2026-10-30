@@ -76,6 +76,8 @@ enum syscall_nr {
     SYS_WAIT_UNTIL  = 33,  /* (ntfn, absolute_tick) -> bits, or -ERR_TIMEDOUT */
     SYS_CLOCK       = 34,  /* () -> monotonic ticks, CLOCK_HZ ticks per second */
 
+    SYS_PROC_WATCHDOG = 35, /* (proc, ticks) -> 0; max user run between syscalls; before start */
+
     SYS_COUNT
 };
 

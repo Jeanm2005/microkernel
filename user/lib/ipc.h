@@ -270,3 +270,9 @@ static inline long sys_wait_until(long ntfn, unsigned long deadline, long *bits)
     if (!r) *bits = a[0];
     return r;
 }
+
+static inline long sys_proc_watchdog(long proc, unsigned long ticks)
+{
+    long a[6] = { proc, (long)ticks, 0, 0, 0, 0 };
+    return syscall6(SYS_PROC_WATCHDOG, a);
+}

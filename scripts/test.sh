@@ -13,6 +13,7 @@ set -u
 OUT="$BUILD/test"
 mkdir -p "$OUT"
 failed=0
+disk_hash=$(sha256sum "$BUILD/disk.img")
 input=""         # set before run_case to type this on the serial port ...
 input_after=""   # ... once this text has appeared in the output
 
@@ -60,6 +61,10 @@ run_case() {
         grep -qF -- "$text" "$log" || { echo "  missing output: $text"; ok=0; }
     done
 
+    if [ "$(sha256sum "$BUILD/disk.img")" != "$disk_hash" ]; then
+        echo "  disk image changed (DMA scratch data was not restored)"
+        ok=0
+    fi
     if [ $ok -eq 1 ]; then
         echo "PASS $name"
     else
@@ -119,6 +124,7 @@ run_case boot "" 1 \
     "[root] ok: a blocked notification wait expires at its deadline" \
     "[root] ok: pending notification bits win over expiration and are consumed once" \
     "[root] ok: timed waits check notification capabilities before deadlines" \
+    "[root] ok: CPU watchdog configuration requires process write rights and bounded ticks" \
     "[root] ok: exit watches validate notification rights and signal bits" \
     "[root] ok: polling a process that was never started is refused" \
     "[root] ok: a running child polls as pending and cannot change its watch" \
@@ -321,6 +327,15 @@ run_case disk-noisy-timeout "selftest=disk-noisy-timeout" 1 \
     "[root] ok: disk timeout recovered with one restart" \
     "[root] cat exited with code 0" \
     "selftest: disk-noisy-timeout completed; no frames leaked" \
+    "kernel: init complete"
+
+run_case driver-watchdog "selftest=driver-watchdog" 1 \
+    "[blk] spinning without syscalls after DMA submission" \
+    "process: killed 'blk': CPU WATCHDOG" \
+    "[root] stopped disk DMA and released its old buffers" \
+    "[root] ok: disk driver restarted exactly once" \
+    "[root] cat exited with code 0" \
+    "selftest: disk driver restarted; filesystem survived; no frames leaked" \
     "kernel: init complete"
 
 run_case unknown-selftest "selftest=nonsense" 3 \

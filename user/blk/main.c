@@ -149,6 +149,10 @@ static int transfer(uint64_t sector, int write)
         printf("simulating a disk request with no completion\n");
     else
         outw(base + 16, 0);
+    if (test_mode == BLK_TEST_SPIN && !write && sector == 1) {
+        printf("spinning without syscalls after DMA submission\n");
+        for (;;) __asm__ volatile("pause");
+    }
     if (test_mode == BLK_TEST_CRASH && !write && sector == 1) {
         printf("crashing during a filesystem request after DMA submission\n");
         *(volatile int *)0 = 1;
@@ -172,7 +176,10 @@ static int transfer(uint64_t sector, int write)
         (void)inb(base + 19);
         if (sys_irq_ack(disk_irq)) sys_exit(BLK_EXIT_IO);
         barrier();
-        if (used[1] != completed)
+        /* DRIVER_OK may schedule queue processing before the suppressed
+         * kick. Ignore such a racing completion only in the stall test,
+         * so the initial read cannot reach the scratch-write self-test. */
+        if (!stall && used[1] != completed)
             break;
     }
     volatile uint32_t *entry = (void *)&used[2 + 4u * (completed % qsize)];
@@ -293,7 +300,8 @@ int main(long arg)
             if (data[i] != (uint8_t)i) ok = 0;
             data[i] = saved[i];
         }
-        if (transfer(sectors - 1, 1)) ok = 0;
+        if (transfer(sectors - 1, 1) || transfer(sectors - 1, 0)) ok = 0;
+        for (int i = 0; i < 512; i++) if (data[i] != saved[i]) ok = 0;
     }
     check(ok, "DMA read/write round trip completed through IRQ notifications");
     printf("done, %d failure(s)\n", failures);

@@ -7,6 +7,8 @@ import struct
 import subprocess
 import time
 from pathlib import Path
+import net_transports as transports
+
 
 HOST = bytes.fromhex('525400abcdef')
 GUEST = bytes.fromhex('525400123456')
@@ -115,6 +117,9 @@ def main():
             invalid.append(bytes(bad))
             for packet in invalid:
                 send(host, packet)
+            # Drain malformed ping frames before the transport tests by
+            # sending a valid UDP datagram whose reply must come first.
+            transports.run(host, send, receive, ethernet, checksum, HOST_IP, GUEST_IP)
             for seq in range(COUNT):
                 length = [0, 1, 31, 1472][seq % 4]
                 payload = bytes((i + seq) & 255 for i in range(length))

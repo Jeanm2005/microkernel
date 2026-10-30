@@ -51,7 +51,7 @@ int main(long mode)
         mode == ROOT_MODE_INIT_RESTART || mode == ROOT_MODE_INIT_TIMEOUT ||
         mode == ROOT_MODE_INIT_REPEATED || mode == ROOT_MODE_INIT_EXHAUST ||
         mode == ROOT_MODE_INIT_BOOT_TIMEOUT || mode == ROOT_MODE_INIT_NOISY_TIMEOUT ||
-        mode == ROOT_MODE_INIT_NET)
+        mode == ROOT_MODE_INIT_NET || mode == ROOT_MODE_NET_SERVE || mode == ROOT_MODE_WATCHDOG)
         return init_main(mode);
     if (mode == ROOT_MODE_IPC_SERVER || mode == ROOT_MODE_IPC_SERVER_CRASH)
         return ipc_server(mode);

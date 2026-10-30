@@ -27,7 +27,7 @@ static int64_t obj_create(struct cspace *cs, int64_t factory_slot, uint64_t type
     return slot;
 }
 
-uint64_t syscall_handle(struct syscall_regs *r)
+static uint64_t dispatch(struct syscall_regs *r)
 {
     uint64_t *a = r->arg;
     struct cspace *cs = &thread_current()->proc->cspace;
@@ -79,6 +79,17 @@ uint64_t syscall_handle(struct syscall_regs *r)
     case SYS_WAIT_UNTIL: return ipc_wait(r, true);
     case SYS_CLOCK: return sched_ticks();
 
+    case SYS_PROC_WATCHDOG: return (uint64_t)sys_proc_watchdog(cs, (int64_t)a[0], a[1]);
+
     default:              return (uint64_t)-ERR_NOSYS;
     }
+}
+
+uint64_t syscall_handle(struct syscall_regs *r)
+{
+    process_watchdog_check();
+    process_watchdog_pause();
+    uint64_t result = dispatch(r);
+    process_watchdog_resume();
+    return result;
 }

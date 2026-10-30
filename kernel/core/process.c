@@ -24,6 +24,7 @@ static bool cache_ready;
 static void user_thread_start(void *arg)
 {
     struct process *p = arg;
+    process_watchdog_resume();
     arch_enter_user(p->entry, USER_STACK_TOP, p->arg);
 }
 
@@ -256,4 +257,24 @@ int64_t copy_from_user(void *dst, uint64_t src, uint64_t len)
         return -ERR_FAULT;
     memcpy(dst, (const void *)src, len);
     return 0;
+}
+
+/* Only terminate at user boundaries: never discard a preempted kernel
+ * stack while it may hold allocator references or be halfway through IPC. */
+void process_watchdog_check(void)
+{
+    struct process *p = thread_current()->proc;
+    if (p && p->watchdog_deadline && thread_current()->run_ticks >= p->watchdog_deadline)
+        process_kill_current("CPU WATCHDOG");
+}
+
+void process_watchdog_pause(void)
+{
+    thread_current()->proc->watchdog_deadline = 0;
+}
+
+void process_watchdog_resume(void)
+{
+    struct process *p = thread_current()->proc;
+    if (p->watchdog_ticks) p->watchdog_deadline = thread_current()->run_ticks + p->watchdog_ticks;
 }

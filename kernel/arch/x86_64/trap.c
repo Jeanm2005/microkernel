@@ -134,5 +134,6 @@ void trap_dispatch(struct trap_frame *tf)
     /* The single place where an interrupted thread can lose the CPU. Its
      * trap frame stays on its own kernel stack; when it is scheduled again
      * it returns from here and `iretq`s back to what it was doing. */
+    if (from_user(tf)) process_watchdog_check();
     sched_preempt_if_needed();
 }
