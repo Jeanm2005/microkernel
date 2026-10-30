@@ -72,7 +72,7 @@ static struct process *run_system(const struct boot_info *boot, uint64_t mode)
 
 bool system_selftest_wanted(const char *name)
 {
-    return strcmp(name, "driver-watchdog") == 0 || strcmp(name, "net-serve") == 0 || strcmp(name, "net-ping") == 0 || strcmp(name, "app-crash") == 0 || strcmp(name, "console-input") == 0 ||
+    return strcmp(name, "guest-sockets") == 0 || strcmp(name, "net-restart") == 0 || strcmp(name, "driver-watchdog") == 0 || strcmp(name, "net-serve") == 0 || strcmp(name, "net-ping") == 0 || strcmp(name, "app-crash") == 0 || strcmp(name, "console-input") == 0 ||
            strcmp(name, "driver-restart") == 0 ||
            strcmp(name, "disk-timeout") == 0 || strcmp(name, "driver-repeated") == 0 ||
            strcmp(name, "driver-exhausted") == 0 || strcmp(name, "disk-boot-timeout") == 0 || strcmp(name, "disk-noisy-timeout") == 0;
@@ -106,6 +106,13 @@ bool system_selftest_run(const char *name, const struct boot_info *boot)
         process_put(run_system_status(boot, mode, exhausted ? 1 : 0));
         kassert(pmm_free_frames() == before);
         kprintf("selftest: %s completed; no frames leaked\n", name);
+        return true;
+    }
+    if (strcmp(name, "guest-sockets") == 0 || strcmp(name, "net-restart") == 0) {
+        uint64_t before = pmm_free_frames();
+        process_put(run_system(boot, strcmp(name, "net-restart") == 0 ? ROOT_MODE_NET_RESTART : ROOT_MODE_SOCKETS));
+        kassert(pmm_free_frames() == before);
+        kprintf("selftest: guest sockets and network recovery ok; no frames leaked\n");
         return true;
     }
     if (strcmp(name, "net-serve") == 0) {

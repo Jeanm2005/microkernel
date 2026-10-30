@@ -78,6 +78,11 @@ enum syscall_nr {
 
     SYS_PROC_WATCHDOG = 35, /* (proc, ticks) -> 0; max user run between syscalls; before start */
 
+    SYS_CALL_UNTIL = 36, /* (ep, w0..w3, absolute_tick), no outgoing cap */
+    SYS_RECV_UNTIL = 37, /* (ep, absolute_tick) */
+    SYS_PROC_STOP = 38, /* (proc), request safe stop, cancel blocked IPC */
+    SYS_CAP_REVOKE = 39, /* (cap), invalidate descendants; GRANT required */
+
     SYS_COUNT
 };
 
@@ -116,6 +121,10 @@ enum syscall_nr {
 /* Errors (returned negated). */
 #define ERR_PERM    1    /* the capability lacks a needed right, or the
                             process may not do this at all */
+#define ERR_BUSY 16
+#define ERR_CANCELED 125
+#define ERR_REVOKED 128
+#define ERR_STALE 116
 #define ERR_IO      5    /* device I/O failed */
 #define ERR_TIMEDOUT 110 /* wait deadline expired */
 #define CLOCK_HZ    100

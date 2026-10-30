@@ -153,13 +153,16 @@ int64_t sys_proc_watch(struct cspace *cs, int64_t proc, int64_t ntfn, uint64_t b
     if (!bits) return -ERR_INVAL;
     uint64_t flags = irq_save();
     if (p->started) { irq_restore(flags); return -ERR_INVAL; }
+    if (!cap_node_valid(nc->node)) { irq_restore(flags); return -ERR_REVOKED; }
     struct notification *n = (struct notification *)nc->obj;
     struct notification *old = p->exit_notification;
+    struct cap_node *old_authority = p->exit_authority;
+    cap_use_get(nc->node); p->exit_authority = nc->node;
     kobj_get(&n->obj);
     p->exit_notification = n;
     p->exit_bits = bits;
     irq_restore(flags);
-    if (old) kobj_put(&old->obj);
+    if (old) { kobj_put(&old->obj); cap_use_put(old_authority); }
     return 0;
 }
 
@@ -186,4 +189,17 @@ int64_t sys_proc_watchdog(struct cspace *cs, int64_t proc, uint64_t ticks)
     p->watchdog_ticks = ticks;
     irq_restore(flags);
     return 0;
+}
+
+int64_t sys_proc_stop(struct cspace *cs, int64_t proc)
+{
+    uint64_t flags = irq_save();
+    struct process *p;
+    int64_t err = lookup_proc(cs, proc, CAP_WRITE, &p);
+    if (!err && (!p->started || p == thread_current()->proc)) err = -ERR_INVAL;
+    if (!err && p->exited) err = -ERR_DEAD;
+    if (!err && p->thread->state == THREAD_BLOCKED && !p->thread->ipc.authority) err = -ERR_BUSY;
+    if (!err) { p->stop_requested = true; ipc_cancel(p->thread, -ERR_CANCELED); }
+    irq_restore(flags);
+    return err;
 }

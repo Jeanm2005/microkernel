@@ -28,6 +28,7 @@
 #include <abi/proto.h>
 #include <abi/pci.h>
 #include <abi/storage.h>
+#include <abi/net.h>
 #include <abi/selftest.h>
 #include "ipc.h"
 #include "root.h"
@@ -53,6 +54,7 @@ struct program {
     int   ndevs;
     long  quota_objects, quota_pages;   /* both 0: no factory */
     long  priority, arg;
+    long branches[MAX_USES], serve_branch, factory_branch;
     long badges[MAX_USES];
     int restarts;
     bool finished;
@@ -280,7 +282,8 @@ static bool create(struct program *p, long *next_badge)
         sys_proc_watchdog(p->proc, 2 * CLOCK_HZ)) return false;
     /* The server may receive on its endpoint and accept capabilities. */
     if (p->ep) {
-        long r = sys_proc_give(p->proc, p->ep, SLOT_SERVE, CAP_READ | CAP_GRANT, 0);
+        p->serve_branch = sys_cap_copy(p->ep, CAP_READ | CAP_GRANT, 0);
+        long r = p->serve_branch > 0 ? sys_proc_give(p->proc, p->serve_branch, SLOT_SERVE, CAP_READ | CAP_GRANT, 0) : p->serve_branch;
         if (r) {
             printf("FAILED: giving %s its endpoint: error %ld\n", p->name, r);
             return false;
@@ -292,8 +295,9 @@ static bool create(struct program *p, long *next_badge)
     for (int k = 0; k < p->nuses; k++) {
         if (!p->badges[k]) p->badges[k] = (*next_badge)++;
         long badge = p->badges[k];
-        long r = sys_proc_give(p->proc, provider(p->uses[k])->ep, SLOT_USES + k,
-                               CAP_WRITE | CAP_GRANT, badge);
+        p->branches[k] = sys_cap_copy(provider(p->uses[k])->ep, CAP_WRITE | CAP_GRANT, badge);
+        long r = p->branches[k] > 0 ? sys_proc_give(p->proc, p->branches[k], SLOT_USES + k,
+                               CAP_WRITE | CAP_GRANT, badge) : p->branches[k];
         if (r) {
             printf("FAILED: giving %s access to '%s': error %ld\n", p->name, p->uses[k], r);
             return false;
@@ -305,10 +309,11 @@ static bool create(struct program *p, long *next_badge)
     /* Its own factory, carved out of ours. */
     if (p->quota_objects || p->quota_pages) {
         long f = sys_factory_split(ROOT_SLOT_FACTORY, p->quota_objects, p->quota_pages);
-        if (f < 0 || sys_proc_give(p->proc, f, SLOT_FACTORY, CAP_ALL, 0) || sys_cap_delete(f)) {
+        if (f < 0 || sys_proc_give(p->proc, f, SLOT_FACTORY, CAP_ALL, 0)) {
             printf("FAILED: giving %s its quota\n", p->name);
             return false;
         }
+        p->factory_branch = f;
         printf("%s gets a quota of %ld objects and %ld pages\n", p->name, p->quota_objects,
                p->quota_pages);
     }
@@ -338,6 +343,17 @@ static bool create(struct program *p, long *next_badge)
         printf("%s drives '%s'\n", p->name, p->devs[k]);
     }
     return true;
+}
+
+static int revoke_grants(struct program *p)
+{
+    long caps[MAX_USES + 2];
+    for (int i = 0; i < MAX_USES; i++) caps[i] = p->branches[i];
+    caps[MAX_USES] = p->serve_branch; caps[MAX_USES+1] = p->factory_branch;
+    for (unsigned i = 0; i < MAX_USES + 2; i++)
+        if (caps[i] > 0 && (sys_cap_revoke(caps[i]) || sys_cap_delete(caps[i]))) return 0;
+    memset(p->branches, 0, sizeof p->branches); p->serve_branch = p->factory_branch = 0;
+    return 1;
 }
 
 /* Tell the console whose badge is whose, so every line it prints carries
@@ -398,7 +414,9 @@ int init_main(long mode)
 {
     const char *file = mode == ROOT_MODE_INIT_CRASH ? "crash.manifest"
                      : mode == ROOT_MODE_INIT_INPUT ? "input.manifest"
-                     : (mode == ROOT_MODE_INIT_NET || mode == ROOT_MODE_NET_SERVE) ? "net.manifest"
+                     : mode == ROOT_MODE_NET_SERVE ? "serve.manifest"
+                     : mode == ROOT_MODE_INIT_NET ? "net.manifest"
+                     : (mode == ROOT_MODE_SOCKETS || mode == ROOT_MODE_NET_RESTART) ? "sockets.manifest"
                      : "system.manifest";
     find_modules();
     long mod = module_slot(file);
@@ -429,6 +447,26 @@ int init_main(long mode)
           "timed waits check notification capabilities before deadlines");
     sys_cap_delete(write_timer);
     sys_cap_delete(timer_test);
+
+    long revoke_ep = sys_obj_create(ROOT_SLOT_FACTORY, OBJ_ENDPOINT);
+    long branch = sys_cap_copy(revoke_ep, CAP_ALL, 0);
+    long leaf = sys_cap_copy(branch, CAP_WRITE, 0);
+    long sibling = sys_cap_copy(revoke_ep, CAP_ALL, 0);
+    check(sys_cap_revoke(leaf) == -ERR_PERM && sys_cap_revoke(branch) == 0 &&
+          sys_cap_copy(leaf, CAP_WRITE, 0) == -ERR_REVOKED,
+          "revocation invalidates descendants and requires GRANT");
+    long fresh = sys_cap_copy(branch, CAP_WRITE, 0);
+    check(fresh > 0 && sys_cap_delete(branch) == 0 &&
+          sys_cap_copy(leaf, CAP_WRITE, 0) == -ERR_REVOKED,
+          "deleted ancestors retain revocation history");
+    check(sys_cap_revoke(revoke_ep) == 0 && sys_cap_copy(sibling, CAP_ALL, 0) == -ERR_REVOKED,
+          "ancestor revocation reaches nested and sibling branches");
+    sys_cap_delete(leaf); sys_cap_delete(fresh); sys_cap_delete(sibling);
+    struct msg timed = { .w = { 123, 456 } };
+    check(sys_call_until(revoke_ep, &timed, sys_clock() + 2) == -ERR_TIMEDOUT && timed.w[0] == 123 &&
+          sys_recv_until(revoke_ep, &timed, sys_clock() + 2) == -ERR_TIMEDOUT,
+          "timed calls leave no queued sender or modified message");
+    sys_cap_delete(revoke_ep);
 
     /* Our own authority has limits too. */
     child_events = sys_obj_create(ROOT_SLOT_FACTORY, OBJ_NOTIFICATION);
@@ -493,6 +531,16 @@ int init_main(long mode)
         for (int i = 0; i < nprogs; i++)
             if (!strcmp(progs[i].name, "net")) progs[i].arg = 0;
 
+    if (mode == ROOT_MODE_NET_RESTART) {
+        struct program *net = provider("net");
+        if (!net) return 1;
+        net->arg |= NET_ARG_STALL;
+        for (int i = 0; i < nprogs; i++) if (!strcmp(progs[i].name, "netsock")) {
+            progs[i].arg = 1;
+            if (sys_proc_give(progs[i].proc, net->proc, SLOT_EVENTS, CAP_READ | CAP_WRITE, 0)) return 1;
+        }
+    }
+
     /* Everything we start runs below our priority, so nothing runs until
      * we block waiting below. */
     for (int i = 0; i < nprogs; i++) {
@@ -512,12 +560,14 @@ int init_main(long mode)
             return 1;
         printf_use_console(console->ep);
         printf("output now goes through the console server\n");
+        check(sys_cap_revoke(ROOT_SLOT_IOPORTS) == -ERR_BUSY,
+              "revocation refuses live device permissions without changing them");
     }
 
     long unavailable_ep = 0;
     int pending = 0;
     for (int i = 0; i < nprogs; i++) if (!progs[i].provides) pending++;
-    while (pending) {
+    while (pending || mode == ROOT_MODE_NET_SERVE) {
         long bits;
         if (unavailable_ep) {
             struct msg request;
@@ -542,22 +592,23 @@ int init_main(long mode)
                  * failures are reported, rather than restarted blindly. */
                 bool recoverable = r == -ERR_DEAD ||
                     (r == 0 && (code == BLK_EXIT_TIMEOUT || code == BLK_EXIT_IO));
-                if (!recoverable || strcmp(p->provides, "blk")) {
+                int network = !strcmp(p->provides, "net");
+                if (!recoverable || (!network && strcmp(p->provides, "blk"))) {
                     printf("FAILED: unexpected server exit: %s\n", p->name);
                     return 1;
                 }
                 if (r == -ERR_DEAD)
-                    printf("observed disk driver fault after process teardown\n");
+                    printf("observed %s driver fault after process teardown\n", network ? "network" : "disk");
                 else
                     printf("observed disk driver I/O failure after process teardown\n");
                 struct program *pc = provider("pci");
                 struct msg m = { .w = { PCI_FIND,
-                    PCI_VENDOR_VIRTIO << 16 | PCI_DEVICE_VIRTIO_BLK } };
+                    PCI_VENDOR_VIRTIO << 16 | (network ? PCI_DEVICE_VIRTIO_NET : PCI_DEVICE_VIRTIO_BLK) } };
                 if (!pc || sys_call(pc->ep, &m, 0) || m.w[0] < 0) return 1;
                 m = (struct msg){ .w = { PCI_RECOVER, m.w[0] } };
                 if (sys_call(pc->ep, &m, 0) || m.w[0]) return 1;
-                printf("stopped disk DMA and released its old buffers\n");
-                if (sys_cap_delete(p->proc)) return 1;
+                printf("stopped %s DMA and released its old buffers\n", network ? "network" : "disk");
+                if (sys_cap_delete(p->proc) || !revoke_grants(p)) return 1;
                 if (p->restarts == DISK_RESTART_LIMIT) {
                     printf("disk restart budget exhausted; stopping the service\n");
                     p->finished = true;
@@ -569,9 +620,9 @@ int init_main(long mode)
                     continue;
                 }
                 p->restarts++;
-                p->arg = disk_test_arg(mode, p->restarts);
+                p->arg = network ? (p->restarts + 1) << 16 : disk_test_arg(mode, p->restarts);
                 if (!create(p, &next_badge) || sys_proc_start(p->proc, p->arg)) return 1;
-                printf("restarted blk with the same endpoint and client badges\n");
+                printf("restarted %s with the same endpoint and client badges\n", p->name);
             } else {
                 p->finished = true;
                 pending--;
@@ -585,6 +636,8 @@ int init_main(long mode)
             }
         }
     }
+    if (mode == ROOT_MODE_NET_RESTART)
+        check(provider("net")->restarts == 1, "network restarted once with revoked old grants");
     if (mode == ROOT_MODE_INIT_RESTART || mode == ROOT_MODE_WATCHDOG)
         check(provider("blk")->restarts == 1, "disk driver restarted exactly once");
 

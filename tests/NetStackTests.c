@@ -4,6 +4,8 @@
 #include "stack.h"
 #include "tcp.h"
 #include "wire.h"
+#include "sockets.h"
+#include <abi/net.h>
 static const uint8_t mac[6] = {0x52,0x54,0,0x12,0x34,0x56};
 static const uint8_t peer[6] = {0x52,0x54,0,0xab,0xcd,0xef};
 static uint32_t random_state = 42;
@@ -26,8 +28,32 @@ static void syn(uint8_t *packet)
     tcp[12] = 5 << 4; tcp[13] = 2; put16(tcp + 14, 4096);
     put16(tcp + 16, transport_checksum(ip, 20));
 }
+static void sockets_test(void)
+{
+    app_reset(1);
+    struct msg m = { .w = { NET_OPEN, NET_UDP }, .badge = 42 };
+    long response[4], handles[4];
+    for (unsigned i = 0; i < 4; i++) {
+        app_request(&m, response); assert(response[0] > 0); handles[i] = response[0];
+    }
+    app_request(&m, response); assert(response[0] == -ERR_FULL);
+    m = (struct msg){ .w = { NET_BIND, handles[0], 9000 }, .badge = 42 };
+    app_request(&m, response); assert(!response[0]);
+    m.w[1] = handles[1]; app_request(&m, response); assert(response[0] == -ERR_EXIST);
+    m = (struct msg){ .w = { NET_RECV | 16 << 8, handles[0] }, .badge = 43 };
+    app_request(&m, response); assert(response[0] == -ERR_PERM);
+    m.badge = 42; app_request(&m, response); assert(response[0] == -ERR_AGAIN);
+    app_reset(2); app_request(&m, response); assert(response[0] == -ERR_STALE);
+    m = (struct msg){ .w = { NET_OPEN, NET_UDP }, .badge = 42 };
+    app_request(&m, response); long handle = response[0];
+    m = (struct msg){ .w = { NET_CLOSE, handle }, .badge = 42 };
+    app_request(&m, response); assert(!response[0]);
+    m.w[0] = NET_RECV | 16 << 8; app_request(&m, response); assert(response[0] == -ERR_BADCAP);
+    app_reset(0);
+}
 int main(void)
 {
+    sockets_test();
     uint8_t seed[NET_FRAME_MAX], out[NET_FRAME_MAX];
     int echo;
     syn(seed); net_reset();

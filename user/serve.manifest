@@ -1,0 +1,4 @@
+# Persistent supervised network service; host loopback forwards to echo port 7.
+console console.elf 200 console - com1 - 0
+pci pci.elf 180 pci console pci 16/0 0
+net net.elf 150 net console,pci - 4/32 65536

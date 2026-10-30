@@ -50,8 +50,12 @@ static void check_memory(void)
     check(sys_map(ro, BUF2, 0) == 0 && ((volatile uint64_t *)BUF2)[1023] == p[1023],
           "mapped read-only at a second address, it shows the same memory");
 
+    check(sys_cap_revoke(frame) == -ERR_BUSY,
+          "revocation refuses an active descendant frame mapping");
     check(sys_unmap(BUF2) == 0 && sys_unmap(BUF) == 0 && sys_unmap(BUF) == -ERR_INVAL,
           "unmapped both");
+    check(sys_cap_revoke(frame) == 0 && sys_frame_info(ro, &pages) == -ERR_REVOKED,
+          "frame descendants can be revoked after unmapping");
     sys_cap_delete(ro);
     sys_cap_delete(frame);
 }

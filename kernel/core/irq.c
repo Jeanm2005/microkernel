@@ -78,12 +78,16 @@ int64_t sys_irq_bind(struct cspace *cs, int64_t irq_slot, int64_t ntfn_slot, uin
     struct notification *n = (struct notification *)nc->obj;
     kobj_get(&n->obj);
     uint64_t flags = irq_save();
+    if (!cap_node_valid(qc->node) || !cap_node_valid(nc->node)) {
+        irq_restore(flags); kobj_put(&n->obj); return -ERR_REVOKED;
+    }
     struct notification *old = q->ntfn;
+    struct cap_node *old_node = q->ntfn_authority;
+    cap_use_get(nc->node); q->ntfn_authority = nc->node;
     q->ntfn = n;
     q->bits = bits;
     irq_restore(flags);
-    if (old)
-        kobj_put(&old->obj);
+    if (old) { kobj_put(&old->obj); cap_use_put(old_node); }
     arch_irq_unmask(q->line);
     return 0;
 }
@@ -110,10 +114,11 @@ void irq_release(struct irq *q)
     if (owner[q->line] == q)
         owner[q->line] = NULL;
     struct notification *n = q->ntfn;
+    struct cap_node *node = q->ntfn_authority;
+    q->ntfn_authority = NULL;
     q->ntfn = NULL;
     irq_restore(flags);
-    if (n)
-        kobj_put(&n->obj);
+    if (n) { kobj_put(&n->obj); cap_use_put(node); }
 }
 
 /* ---- I/O ports ---------------------------------------------------------- */
@@ -141,6 +146,16 @@ int64_t sys_ioport_enable(struct cspace *cs, int64_t slot)
         p->io_hi = 0;
     }
 
+    uint64_t guard = irq_save();
+    if (!cap_node_valid(c->node)) { irq_restore(guard); return -ERR_REVOKED; }
+    unsigned enabled;
+    for (enabled = 0; enabled < 16; enabled++) if (p->ports[enabled] == c->node) break;
+    if (enabled == 16) {
+        for (enabled = 0; enabled < 16 && p->ports[enabled]; enabled++);
+        if (enabled == 16) { irq_restore(guard); return -ERR_FULL; }
+        cap_use_get(c->node); p->ports[enabled] = c->node;
+    }
+    irq_restore(guard);
     /* The permission belongs to the process from now on; deleting the
      * capability doesn't take it back (that needs revocation, M9). */
     uint64_t flags = irq_save();
@@ -170,13 +185,19 @@ int64_t sys_ioport_sub(struct cspace *cs, int64_t factory_slot, int64_t slot, ui
     struct kobj *sub = ioport_create((uint32_t)base, (uint32_t)count, (struct factory *)fc->obj);
     if (!sub)
         return -ERR_NOMEM;
-    int64_t new_slot = cspace_insert(cs, sub, CAP_ALL, 0);
-    kobj_put(sub);
+    uint64_t flags = irq_save();
+    struct cap_node *node = cap_node_new(sub, c->node);
+    int64_t new_slot = node ? cspace_insert_node(cs, node, CAP_ALL, 0, 0) : -ERR_NOMEM;
+    if (node) cap_node_put(node);
+    kobj_put(sub); irq_restore(flags);
     return new_slot;
 }
 
 void ioport_release(struct process *p)
 {
+    for (unsigned i = 0; i < 16; i++) if (p->ports[i]) {
+        cap_use_put(p->ports[i]); p->ports[i] = NULL;
+    }
     if (p->io_allowed) {
         pmm_free_contig(hhdm_to_phys(p->io_allowed), IO_BITMAP_PAGES);
         p->io_allowed = NULL;
@@ -191,9 +212,11 @@ int64_t sys_irq_unbind(struct cspace *cs, int64_t slot)
     uint64_t flags = irq_save();
     arch_irq_mask(q->line);
     struct notification *old = q->ntfn;
+    struct cap_node *old_node = q->ntfn_authority;
+    q->ntfn_authority = NULL;
     q->ntfn = NULL;
     q->bits = 0;
     irq_restore(flags);
-    if (old) kobj_put(&old->obj);
+    if (old) { kobj_put(&old->obj); cap_use_put(old_node); }
     return 0;
 }

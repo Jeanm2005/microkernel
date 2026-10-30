@@ -115,6 +115,14 @@ run_case boot "" 1 \
     "[ping] ok: server woke up and saw bits 0x5" \
     "[pong] quitting" \
     "[ping] done, 0 failure(s)" \
+    "selftest: cross-process revocation ok; no frames leaked" \
+    "[root] ok: revocation invalidates descendants and requires GRANT" \
+    "[root] ok: deleted ancestors retain revocation history" \
+    "[root] ok: ancestor revocation reaches nested and sibling branches" \
+    "[root] ok: timed calls leave no queued sender or modified message" \
+    "[root] ok: revocation refuses live device permissions without changing them" \
+    "[blk] ok: revocation refuses an active descendant frame mapping" \
+    "[blk] ok: frame descendants can be revoked after unmapping" \
     "selftest: ipc ok" \
     "[root] read system.manifest: 6 programs" \
     "[root] ok: can't create a process above its own priority" \

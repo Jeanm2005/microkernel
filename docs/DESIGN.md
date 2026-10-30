@@ -668,7 +668,8 @@ process containing the driver and minimal IP stack. Storage uses its original
 manifest. All packet processing runs in ring 3; the kernel has no networking
 code or new networking syscalls. The PCI server grants the NIC's BAR and IRQ
 only after claim, and pins the driver's single DMA frame until device reset,
-just as for the disk. Network-specific automatic restart is not implemented.
+just as for the disk. The supervised network manifests use the same bounded device-reset/restart
+policy as the disk; finite ping-only runs retain their original lifecycle.
 
 The legacy virtio-net interface has two queues, RX (0) and TX (1). Only the
 MAC feature is negotiated; checksumming is done in software and no GSO or
@@ -719,8 +720,8 @@ lines or future interrupt-routing support.
 
 ## Practical transport services and hardening
 
-`make net-serve` selects `selftest=net-serve` and starts the network program
-with count 0, meaning persistent service. It uses the same static IPv4
+`make net-serve` selects `selftest=net-serve`, uses `serve.manifest` and starts
+a persistent supervised network server. It uses the same static IPv4
 address, with QEMU user networking forwarding host loopback TCP 2222 and
 UDP 2223 to guest port 7. The finite `net-demo` mode still exits after its
 ping count to verify teardown and DMA frame reclamation.
@@ -748,7 +749,7 @@ that stall are reset and their slots reclaimed. Peer FIN may be held while
 the last echo is acknowledged. These mechanisms follow the relevant packet
 and sequence rules in [RFC 9293](https://www.rfc-editor.org/rfc/rfc9293), but
 this deliberately small implementation is **not a complete conforming TCP**:
-there is no active open, general guest socket API, receive reassembly queue,
+there is no active open, POSIX socket API, receive reassembly queue,
 SACK, timestamps, window scaling, urgent-data support, dynamic RTT estimator,
 persist probing, or full congestion control. One outstanding segment per
 connection limits throughput; this is intended for the local functional
@@ -781,16 +782,122 @@ or allocation. `selftest=driver-watchdog` spins after disk DMA submission;
 root observes the kill, resets the device, releases the pinned frame,
 restarts the driver and completes the filesystem read without leaks.
 
-This watchdog does not cancel a process stuck inside IPC or kernel code,
-and a process making frequent syscalls can satisfy it without useful work.
-Networking faults are currently reported as application failures rather
-than automatically restarted; disk supervision still has its bounded restart
-policy. General capability revocation and SMP have not been implemented.
+This CPU watchdog does not time blocked IPC or kernel execution, and a
+process making frequent syscalls can satisfy it without useful work. Timed
+IPC, safe process stopping and network supervision are described next.
+SMP, shared IRQ routing and recovery from a kernel deadlock remain future work.
 
-Next practical priorities are a guest-facing socket IPC API and an application
-using it, network-service restart/reconnect, cancellable/timed IPC for blocked
-server watchdogs, then capability revocation and shared IRQ routing. These
-are follow-up work, not marked complete by the transport and watchdog tests.
+## Guest socket IPC and supervised network recovery
+
+`include/abi/net.h` specifies version 1 of the guest API, implemented by
+`user/net/sockets.c`. Eight socket slots, four per endpoint badge, bound
+memory consumption. UDP binds a local port, receives datagrams in 16-byte
+chunks (reply word 1 reports bytes remaining in the datagram), and replies
+to the last accepted peer. UDP application queues are bounded to 256 bytes;
+oversize datagrams and datagrams arriving while that queue is occupied are
+dropped. Port-7 built-in UDP echo still supports MTU-sized datagrams.
+There is no active UDP peer discovery/ARP resolution API yet.
+
+TCP sockets support bind, listen, accept, receive, queued send and close.
+Accepted streams have 256-byte receive/transmit queues; TCP advertises their
+available receive space and sends window updates after application reads.
+The existing sequence, checksum and retransmission engine handles packets.
+Closing after peer EOF flushes queued data and completes passive FIN close;
+closing before EOF aborts the connection with reset. A failed/reset connection
+reports I/O error after buffered data is consumed. Unaccepted connections
+are reclaimed on reset. This is a passive socket API, not active connect or
+POSIX compatibility. Operations return `-ERR_AGAIN` rather than parking the
+single network server; clients retry within their own deadlines.
+
+Handles include an incarnation, slot counter and slot index. Every request
+also checks the kernel-stamped client badge. A stale-incarnation handle gets
+`-ERR_STALE`; a closed/reused slot gets `-ERR_BADCAP`; another badge gets
+`-ERR_PERM`. Slot counters never wrap within an incarnation. Application
+socket state is lost on server restart, so clients query `NET_INFO`, reopen,
+rebind and reaccept connections. Kernel endpoint capabilities remain stable.
+The server multiplexes timed endpoint receive, bound IRQ notifications, TCP
+timers and application transmit queues on one thread.
+
+`sockets.manifest` starts a separate `netsock` application using only console
+and badged network endpoints. `guest-sockets-test` validates host UDP and a
+1025-byte TCP stream through that application's IPC reads/writes, plus badge
+isolation, clean server shutdown and complete frame reclamation. The restart
+variant deliberately blocks the network server in a private notification
+wait. The application times out its call and uses a **test-only explicitly
+granted process capability** to request stop; ordinary socket clients do not
+receive this authority. Root waits for teardown, resets the NIC and unbinds
+its IRQ, revokes the old per-process grants, and starts a fresh incarnation
+with the same endpoint and badges. The application verifies stale-handle
+rejection and serves new UDP/TCP connections. Existing TCP connections must
+be reestablished; transparent stream replay is not promised.
+
+`serve.manifest` supplies the persistent supervised daemon used by
+`make net-serve`. Root continues watching even without an application to
+wait for. Faults or designated I/O failures allow up to three restarts; after
+exhaustion the NIC remains reset and root answers socket requests with I/O
+errors. The ping-only manifest still supports its finite acceptance test.
+
+## Timed IPC, safe stops and revocation
+
+`call_until(ep, words, deadline)` bounds both endpoint rendezvous and reply
+wait using one absolute scheduler-tick deadline. This variant sends no
+capability (a reply may still transfer one). `recv_until` bounds receive;
+the previous notification deadline API is unchanged. Callers and receivers
+hold authority references on an active-operation list. Timer expiration,
+revocation and supervisor stop remove the exact thread from its object
+queue, discard any undelivered transferred capability, disarm its timeout
+and sever both ends of the implicit reply relationship before wakeup.
+A late server reply therefore cannot reach a reused/freed thread. Timeout
+does not roll back work already delivered to the server: applications must
+not blindly retry non-idempotent writes.
+
+`proc_stop` requires WRITE on a live process capability. A target blocked
+in IPC is canceled, then killed on its syscall return path. A runnable target
+is stopped at its next user boundary. The kernel never discards a preempted
+kernel stack. Stopping an unstarted process is invalid (delete its handle
+instead); stopping an exited process reports DEAD. A process blocked in a
+kernel wait not represented by IPC currently reports BUSY. This is not a
+mechanism to interrupt a kernel deadlock. Privileged supervisors can use a
+client's deadline failure as a reason to stop and restart a server; a general
+automatic wall-clock lease policy is not implemented.
+
+Capabilities now reference bounded derivation nodes. Copy, process give and
+IPC transfer preserve ancestry; I/O subranges descend from the parent port
+capability. GRANT permits `cap_revoke`, which advances that node's generation:
+all old descendants, including copies in another process or a queued
+message, become invalid; the caller and unrelated sibling authorities remain
+valid. New derivation from the retained caller capability is allowed. Lookup
+checks the generation chain, and revoked slots remain occupied/deletable,
+with metadata and object references retained until owners delete them or
+exit. Deleting an ancestor does not erase revocation history. This is logical
+revocation, not automatic reference reclamation. New objects allocated from
+factories are independent roots; revoking a factory copy does not revoke
+previously allocated objects.
+
+The kernel limits ancestry to depth 32 and all live derivation metadata to
+4096 nodes. Allocation failure is explicit; there is no unbounded history
+chain. Revocation refuses live descendant resource uses with BUSY before
+changing generations: mappings, enabled port grants, notification bindings
+and exit watches are retained as resource authority references. IRQ guards
+are conservative while a line is bound. No successful revocation silently
+leaves a descendant CPU mapping or I/O bitmap enabled. This design does not
+forcibly unmap memory or reset bus-mastering devices; stop/unmap/unbind and
+reset must precede device-grant retirement. DMA pinning and trusted device
+supervision remain necessary without an IOMMU.
+
+Root retains a private branch for each service grant it delegates to a
+process, plus the process's receive and quota grants. Recovery revokes and
+deletes those old branches after process/device teardown, without revoking
+the stable service endpoint or other clients. Tests verify permission checks,
+ancestry and sibling invalidation, deleted-ancestor history, frame/device BUSY
+guards, timed queue removal and cross-process blocked-call cancellation.
+Existing boot and leak checks cover metadata reclamation. Sanitizer tests
+also cover socket quota, ownership, incarnation and closed-handle behavior.
+
+Next priorities are active UDP/TCP connect, a supervisor request API for
+client-reported outages, timed cancellation of non-IPC kernel waits, shared
+interrupt routing, and stronger resource reclamation for hostile capability
+holders. SMP and broader device recovery remain outside this increment.
 
 ## Syscall ABI
 
@@ -837,7 +944,11 @@ object types and error codes live in `include/abi/syscall.h`.
 | 33 | `wait_until(ntfn, absolute_tick)` | notification wait with deadline; `-ERR_TIMEDOUT` on expiration |
 | 34 | `clock() -> ticks` | monotonic clock, `CLOCK_HZ` ticks per second |
 | 35 | `proc_watchdog(proc, ticks)` | WRITE; configure continuous user run budget before start, 0 disables |
-| later | `thread_create`, `cap_revoke` | future work |
+| 36 | `call_until(ep, w0..w3, absolute_tick)` | timed rendezvous and reply, no outgoing cap |
+| 37 | `recv_until(ep, absolute_tick)` | receive deadline; bound notifications still interrupt |
+| 38 | `proc_stop(proc)` | WRITE; cancel blocked IPC and stop at a safe boundary |
+| 39 | `cap_revoke(cap)` | GRANT; invalidate descendants, BUSY for live resource uses |
+| later | `thread_create` | future work |
 
 ## Milestones
 

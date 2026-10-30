@@ -37,9 +37,9 @@ static uint64_t dispatch(struct syscall_regs *r)
     case SYS_EXIT:        process_exit_current((int)a[0]);
     case SYS_YIELD:       thread_yield(); return 0;
 
-    case SYS_SEND:        return ipc_send(r, false);
-    case SYS_CALL:        return ipc_send(r, true);
-    case SYS_RECV:        return ipc_recv(r);
+    case SYS_SEND:        return ipc_send(r, false, false);
+    case SYS_CALL:        return ipc_send(r, true, false);
+    case SYS_RECV:        return ipc_recv(r, false);
     case SYS_REPLY:       return ipc_reply(r, false);
     case SYS_REPLY_RECV:  return ipc_reply(r, true);
     case SYS_NOTIFY:      return ipc_notify(r);
@@ -81,6 +81,10 @@ static uint64_t dispatch(struct syscall_regs *r)
 
     case SYS_PROC_WATCHDOG: return (uint64_t)sys_proc_watchdog(cs, (int64_t)a[0], a[1]);
 
+    case SYS_CALL_UNTIL: return ipc_send(r, true, true);
+    case SYS_RECV_UNTIL: return ipc_recv(r, true);
+    case SYS_CAP_REVOKE: return (uint64_t)cspace_revoke(cs, (int64_t)a[0]);
+    case SYS_PROC_STOP: return (uint64_t)sys_proc_stop(cs, (int64_t)a[0]);
     default:              return (uint64_t)-ERR_NOSYS;
     }
 }
@@ -90,6 +94,7 @@ uint64_t syscall_handle(struct syscall_regs *r)
     process_watchdog_check();
     process_watchdog_pause();
     uint64_t result = dispatch(r);
+    process_watchdog_check();
     process_watchdog_resume();
     return result;
 }

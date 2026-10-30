@@ -1,0 +1,5 @@
+# Separate guest socket client; only the network server owns the device.
+console console.elf 200 console - com1 - 0
+pci pci.elf 180 pci console pci 16/0 0
+net net.elf 150 net console,pci - 4/32 65536
+netsock netsock.elf 100 - console,net,net - - 0

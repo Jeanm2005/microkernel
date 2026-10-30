@@ -55,6 +55,7 @@ make test    # boot regression cases, then run the host-to-guest network test
 make net-demo # ARP, ping, UDP and TCP packet tests over a local socket pair
 make net-serve # persistent guest: TCP localhost:2222 and UDP localhost:2223
 make net-sockets-test # native host TCP/UDP clients against the persistent guest
+make guest-sockets-test # separate guest application, plus blocked-server restart/reconnect
 make debug   # QEMU waits for GDB: gdb build/kernel.elf -ex 'target remote :1234'
 
 make run CMDLINE="selftest=pagefault"     # watch a page-fault report
@@ -100,17 +101,49 @@ python3 -c 'import socket; s=socket.socket(socket.AF_INET,socket.SOCK_DGRAM); s.
 TCP supports passive connections, bounded concurrent state, binary streams,
 retransmission, duplicate detection, sequence wrap and passive FIN close.
 UDP preserves datagram boundaries and validates lengths and checksums.
-These are fixed echo services, not a POSIX socket API for guest programs.
+Port 7 remains a built-in echo service. Guest applications can now use the
+separate IPC socket API described below; it is not a POSIX socket API.
 The stack deliberately uses one outstanding TCP segment per connection;
-active connects, general application sockets and a full TCP congestion-control
+active connects and a full TCP congestion-control
 implementation remain future work.
 
 The supervisor now configures a two-second CPU watchdog for the disk and
 network drivers. A driver spinning in user space without syscalls is killed
 at a safe user boundary; disk recovery resets DMA before restarting it.
-Blocked IPC and kernel execution are outside this CPU watchdog's scope.
+The CPU watchdog does not time blocked IPC. Absolute-deadline calls and
+receives, safe supervisor stops, and endpoint revocation now provide separate
+blocked-IPC cancellation.
 `make test` includes sanitizer checks of truncated/mutated packets, 21 boot
 cases (including `selftest=driver-watchdog`), packet-level loss/reorder tests,
 and native host TCP/UDP socket tests. LeakSanitizer needs an environment
 that permits process inspection (run outside a debugger/restrictive sandbox).
 See [the design](docs/DESIGN.md) for current limits and follow-up priorities.
+
+## Guest sockets and service recovery
+
+The guest-facing protocol lives in [include/abi/net.h](include/abi/net.h),
+with helpers in [user/lib/net.h](user/lib/net.h). It supports UDP bind,
+receive and reply, and passive TCP bind/listen/accept/read/write/close.
+`user/netsock/main.c` is a separate application with console and network
+endpoint capabilities only. Its test receives UDP on guest port 9000 and
+TCP on 9001 and sends the data back through IPC. Operations are nonblocking;
+messages carry up to 16 payload bytes. Handles belong to a client badge
+and server incarnation, so neither another client nor a replacement server
+can accidentally reuse an old handle.
+
+`make guest-sockets-test` runs the application normally, then repeats after
+a deliberately blocked network server. The client times out its call,
+uses an explicitly granted test-admin process capability to stop the server,
+waits for the new incarnation, and reopens its sockets. Root resets the NIC
+before releasing DMA buffers, revokes old delegated grants, and restarts the
+server on its stable endpoint. TCP connections do not survive restart;
+applications reconnect explicitly. `make net-serve` now uses a persistent,
+supervised server (`serve.manifest`) with the same bounded recovery policy.
+
+Capabilities now have derivation history. `cap_revoke` invalidates descendants
+while retaining the caller's capability; cross-process blocked IPC is canceled
+with `-ERR_REVOKED`. Revoked slots stay occupied and deletable until owners
+clean them up, preventing silent slot reuse. Revocation returns `-ERR_BUSY`
+if affected descendants still authorize mappings, enabled ports or bindings:
+stop/unmap/unbind first. It does not itself reset hardware or revoke DMA.
+See [docs/DESIGN.md](docs/DESIGN.md) for semantics, bounds and remaining work.

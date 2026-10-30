@@ -4,6 +4,7 @@
 #include "ulib.h"
 #include "wire.h"
 #include "tcp.h"
+#include "sockets.h"
 void net_reset(void) { tcp_reset(); }
 size_t net_poll(uint8_t *out, uint64_t now) { return tcp_poll(out, now); }
 size_t net_reply(const uint8_t *in, size_t len, uint8_t *out,
@@ -41,8 +42,9 @@ size_t net_reply(const uint8_t *in, size_t len, uint8_t *out,
     if (ip[9] == 17) {
         const uint8_t *udp = ip + 20;
         size_t n = total - 20;
-        if (be16(udp + 2) != NET_ECHO_PORT || !be16(udp) || be16(udp + 4) != n ||
+        if (!be16(udp) || be16(udp + 4) != n ||
             (be16(udp + 6) && transport_checksum(ip, n))) return 0;
+        if (be16(udp + 2) != NET_ECHO_PORT) { (void)app_udp(in, n); return 0; }
         size_t size = 14 + total;
         memset(out, 0, size < 60 ? 60 : size);
         ip_header(out, in + 6, mac, source, 17, n);

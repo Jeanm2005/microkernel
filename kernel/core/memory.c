@@ -74,34 +74,40 @@ int64_t sys_map(struct cspace *cs, int64_t slot, uint64_t vaddr, uint64_t writab
         return -ERR_INVAL;
 
     struct process *p = thread_current()->proc;
+    uint64_t saved = irq_save();
+    if (!cap_node_valid(c->node)) { irq_restore(saved); return -ERR_REVOKED; }
     int m;
     for (m = 0; m < PROC_MAPPINGS && p->maps[m].frame; m++)
         ;
-    if (m == PROC_MAPPINGS)
-        return -ERR_FULL;
+    if (m == PROC_MAPPINGS) { irq_restore(saved); return -ERR_FULL; }
 
     unsigned flags = PAGE_USER | (writable ? PAGE_WRITE : 0);
     for (uint64_t off = 0; off < len; off += PAGE_SIZE) {
         if (!paging_map(p->root, vaddr + off, fr->phys + off, flags)) {
             for (uint64_t undo = 0; undo < off; undo += PAGE_SIZE)
                 paging_unmap(p->root, vaddr + undo);
-            return -ERR_EXIST;
+            irq_restore(saved); return -ERR_EXIST;
         }
     }
+    cap_use_get(c->node); p->maps[m].authority = c->node;
     kobj_get(&fr->obj);
     p->maps[m].vaddr = vaddr;
     p->maps[m].frame = fr;
+    irq_restore(saved);
     return 0;
 }
 
 static void unmap_one(struct process *p, int m)
 {
+    uint64_t saved = irq_save();
     struct frame *fr = p->maps[m].frame;
     for (uint64_t off = 0; off < (uint64_t)fr->pages * PAGE_SIZE; off += PAGE_SIZE)
         paging_unmap(p->root, p->maps[m].vaddr + off);
     p->maps[m].frame = NULL;
     p->maps[m].vaddr = 0;
     kobj_put(&fr->obj);
+    cap_use_put(p->maps[m].authority); p->maps[m].authority = NULL;
+    irq_restore(saved);
 }
 
 int64_t sys_unmap(uint64_t vaddr)

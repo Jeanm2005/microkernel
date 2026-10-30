@@ -89,6 +89,7 @@ struct frame {
 struct irq {
     struct kobj          obj;
     uint32_t             line;
+    struct cap_node *ntfn_authority;
     struct notification *ntfn;   /* holds a reference, or NULL if unbound */
     uint64_t             bits;
 };

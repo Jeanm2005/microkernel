@@ -66,8 +66,28 @@ static void run_pair(const struct boot_info *boot, uint64_t server_mode, uint64_
     *client_out = client;
 }
 
+static void revoke_test(const struct boot_info *boot)
+{
+    uint64_t before = pmm_free_frames();
+    struct cspace owner = { 0 };
+    struct kobj *ep = kobj_create(KOBJ_ENDPOINT, NULL);
+    kassert(ep);
+    int64_t slot = cspace_insert(&owner, ep, CAP_ALL, 0); kobj_put(ep);
+    struct process *client = make(boot, "revoke", ROOT_MODE_REVOKED);
+    kassert(slot > 0 && cspace_derive(&owner, slot, &client->cspace, TEST_SLOT_EP,
+                                    CAP_WRITE | CAP_GRANT, 42) > 0);
+    process_start(client); thread_sleep(2);
+    kassert(client->thread->state == THREAD_BLOCKED);
+    kassert(cspace_revoke(&owner, slot) == 0);
+    process_wait(client); kassert(!client->killed && client->exit_code == 0);
+    process_put(client); cspace_clear(&owner);
+    kassert(pmm_free_frames() == before);
+    kprintf("selftest: cross-process revocation ok; no frames leaked\n");
+}
+
 void ipc_selftest_boot(const struct boot_info *boot)
 {
+    revoke_test(boot);
     uint64_t before = pmm_free_frames();
     uint64_t t0 = sched_ticks();
     uint64_t direct0 = sched_direct_switches();

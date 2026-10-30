@@ -276,3 +276,26 @@ static inline long sys_proc_watchdog(long proc, unsigned long ticks)
     long a[6] = { proc, (long)ticks, 0, 0, 0, 0 };
     return syscall6(SYS_PROC_WATCHDOG, a);
 }
+
+static inline long sys_call_until(long ep, struct msg *m, unsigned long deadline)
+{
+    long a[6] = { ep, m->w[0], m->w[1], m->w[2], m->w[3], (long)deadline };
+    long r = syscall6(SYS_CALL_UNTIL, a);
+    if (!r) msg_from_regs(m, a);
+    return r;
+}
+static inline long sys_recv_until(long ep, struct msg *m, unsigned long deadline)
+{
+    long a[6] = { ep, (long)deadline, 0, 0, 0, 0 };
+    long r = syscall6(SYS_RECV_UNTIL, a);
+    if (r >= 0) msg_from_regs(m, a);
+    return r;
+}
+static inline long sys_cap_revoke(long cap)
+{
+    long a[6] = { cap }; return syscall6(SYS_CAP_REVOKE, a);
+}
+static inline long sys_proc_stop(long proc)
+{
+    long a[6] = { proc }; return syscall6(SYS_PROC_STOP, a);
+}

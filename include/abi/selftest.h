@@ -15,6 +15,9 @@ enum root_mode {
     ROOT_MODE_IPC_CLIENT_ORPHAN = 7,  /* client that expects -ERR_DEAD */
 
     /* The real job: start the system described by a manifest. */
+    ROOT_MODE_REVOKED = 22,
+    ROOT_MODE_SOCKETS = 20,
+    ROOT_MODE_NET_RESTART = 21,
     ROOT_MODE_NET_SERVE   = 18, /* persistent TCP/UDP/ICMP services */
     ROOT_MODE_WATCHDOG    = 19, /* disk driver stuck in a userspace CPU loop */
     ROOT_MODE_INIT_NET    = 17, /* net.manifest: Ethernet ping demo */

@@ -21,6 +21,7 @@ struct notification;
 #define PROC_MAPPINGS 16   /* frames one process can have mapped at once */
 
 struct mapping {
+    struct cap_node *authority;
     uint64_t      vaddr;
     struct frame *frame;   /* NULL = unused entry; holds a reference */
 };
@@ -33,6 +34,8 @@ struct process {
     uint64_t       arg;            /* passed to the program in rdi */
 
     uint64_t watchdog_ticks, watchdog_deadline; /* userspace CPU watchdog */
+    bool stop_requested;
+    struct cap_node *ports[16];
     bool           started;        /* process_start() has run */
     bool           may_debug_write; /* only processes the kernel itself started */
 
@@ -52,6 +55,7 @@ struct process {
     uint64_t       run_ticks;      /* timer ticks its thread ran for, set at exit */
     int            refs;           /* the thread + whoever holds the pointer */
     bool           at_line_start;  /* for prefixing debug output with the name */
+    struct cap_node *exit_authority;
     struct notification *exit_notification; /* held until teardown */
     uint64_t exit_bits;
     struct waitq   exit_waiters;   /* kernel threads in process_wait() */

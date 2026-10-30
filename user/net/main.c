@@ -2,6 +2,8 @@
  * One pinned frame contains two queues and all packet buffers. */
 #include <abi/boot.h>
 #include <abi/pci.h>
+#include <abi/net.h>
+#include "sockets.h"
 #include "io.h"
 #include "ipc.h"
 #include "ulib.h"
@@ -85,8 +87,14 @@ static int send_packet(size_t len)
     tx.completed++;
     return 0;
 }
-int main(long count)
+int main(long argument)
 {
+    long count = argument & 0xffff;
+    unsigned epoch = ((unsigned long)argument >> 16) & 0xffff;
+    if (!epoch) epoch = 1;
+    long serve = sys_cap_copy(SLOT_SERVE, CAP_READ | CAP_GRANT, 0);
+    int server = serve > 0;
+    if (serve > 0) sys_cap_delete(serve);
     printf_use_console(SLOT_USES);
     long addr = pci(PCI_FIND, PCI_VENDOR_VIRTIO << 16 | PCI_DEVICE_VIRTIO_NET, 0);
     if (count < 0 || count > 1000 || addr < 0 || pci(PCI_CLAIM, addr, 0)) return 1;
@@ -122,22 +130,47 @@ int main(long count)
     events = sys_obj_create(SLOT_FACTORY, OBJ_NOTIFICATION);
     irq = irq_cap;
     if (events <= 0 || sys_irq_bind(irq, events, 1)) goto fail;
+    if (server && sys_ntfn_bind(events)) goto fail;
     barrier(); outb(base + 18, 7); outw(base + 16, 0);
     printf("ready: 10.0.2.15, MAC %02x:%02x:%02x:%02x:%02x:%02x, IRQ %ld\n",
            mac[0],mac[1],mac[2],mac[3],mac[4],mac[5],line);
-    net_reset();
+    net_reset(); app_reset(epoch);
     unsigned long deadline = sys_clock() + 30 * CLOCK_HZ;
     unsigned received = 0, dropped = 0;
     long echoes = 0;
     while (!count || echoes < count) {
         unsigned long now = sys_clock();
         if (count && now >= deadline) goto fail;
+        size_t application_reply = app_poll(reply, mac);
+        if (application_reply && send_packet(application_reply)) goto fail;
         size_t timer_reply = net_poll(reply, now);
         if (timer_reply && send_packet(timer_reply)) goto fail;
         barrier();
         if (rx.used[1] == rx.completed) {
-            long r = wait_irq(sys_clock() + CLOCK_HZ / 10);
-            if (r && r != -ERR_TIMEDOUT) goto fail;
+            if (server) {
+                struct msg m;
+                long r = sys_recv_until(SLOT_SERVE, &m, sys_clock() + CLOCK_HZ / 10);
+                if (r == IPC_NOTIFIED) {
+                    (void)inb(base + 19); if (sys_irq_ack(irq)) goto fail;
+                } else if (!r) {
+                    long response[4] = { 0 };
+                    if (m.cap > 0) sys_cap_delete(m.cap);
+                    if (PROTO_OP(m.w[0]) == PROTO_SHUTDOWN) {
+                        if (m.badge) response[0] = -ERR_PERM;
+                        else { outb(base + 18, 0); sys_reply(response, 0); return 0; }
+                    } else if (PROTO_OP(m.w[0]) == NET_TEST_STALL && (argument & NET_ARG_STALL)) {
+                        printf("test: blocked in notification wait\n");
+                        long never = sys_obj_create(SLOT_FACTORY, OBJ_NOTIFICATION), bits;
+                        if (never < 0) goto fail;
+                        sys_wait(never, &bits); goto fail;
+                    } else app_request(&m, response);
+                    /* A timed-out caller may have detached its reply. */
+                    (void)sys_reply(response, 0);
+                } else if (r != -ERR_TIMEDOUT) goto fail;
+            } else {
+                long r = wait_irq(sys_clock() + CLOCK_HZ / 10);
+                if (r && r != -ERR_TIMEDOUT) goto fail;
+            }
             continue;
         }
         if ((uint16_t)(rx.used[1] - rx.completed) > RX_BUFFERS) goto fail;
@@ -163,5 +196,5 @@ int main(long count)
 fail:
     outb(base + 18, 0); /* stop DMA before teardown; PCI also retains the frame */
     printf("FAILED: network initialization, completion or receive deadline\n");
-    return 1;
+    return 74;
 }

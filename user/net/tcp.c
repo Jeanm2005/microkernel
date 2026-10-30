@@ -2,6 +2,7 @@
  * per connection. No heap allocations and no out-of-order receive queue. */
 #include "tcp.h"
 #include "wire.h"
+#include "sockets.h"
 #define FIN 1
 #define SYN 2
 #define RST 4
@@ -11,7 +12,8 @@ enum state { FREE, SYN_RECEIVED, ESTABLISHED, LAST_ACK };
 struct connection {
     enum state state;
     uint32_t peer_ip, receive, una, next;
-    uint16_t port, mss, window;
+    uint16_t port, service, mss, window, advertised;
+    unsigned app_id;
     uint8_t peer_mac[6], mac[6];
     uint64_t deadline, idle;
     unsigned retries;
@@ -36,7 +38,7 @@ static size_t packet(struct connection *c, uint8_t *out, uint32_t seq, unsigned 
     memset(out, 0, size < 60 ? 60 : size);
     ip_header(out, c->peer_mac, c->mac, c->peer_ip, 6, header + (unsigned)len);
     uint8_t *tcp = out + 34;
-    put16(tcp, NET_ECHO_PORT); put16(tcp + 2, c->port);
+    put16(tcp, c->service ? c->service : NET_ECHO_PORT); put16(tcp + 2, c->port);
     put32(tcp + 4, seq); put32(tcp + 8, c->receive);
     tcp[12] = (uint8_t)((header / 4) << 4); tcp[13] = flags;
     put16(tcp + 14, window);
@@ -47,12 +49,13 @@ static size_t packet(struct connection *c, uint8_t *out, uint32_t seq, unsigned 
 }
 static size_t ack_packet(struct connection *c, uint8_t *out)
 {
-    return packet(c, out, c->next, ACK, NULL, 0, c->pending_len ? 0 : TCP_MSS);
+    c->advertised = c->app_id ? app_tcp_space(c->app_id) : c->pending_len ? 0 : TCP_MSS;
+    return packet(c, out, c->next, ACK, NULL, 0, c->advertised);
 }
 static size_t tracked(struct connection *c, uint8_t *out, unsigned flags,
                        const uint8_t *data, size_t len, uint64_t now)
 {
-    size_t n = packet(c, out, c->next, flags, data, len, flags & SYN ? TCP_MSS : 0);
+    size_t n = packet(c, out, c->next, flags, data, len, c->app_id ? app_tcp_space(c->app_id) : flags & SYN ? TCP_MSS : 0);
     c->next += (uint32_t)len + !!(flags & SYN) + !!(flags & FIN);
     memcpy(c->pending, out, n); c->pending_len = n;
     c->deadline = now + TCP_RTO; c->retries = 0;
@@ -96,15 +99,15 @@ size_t tcp_reply(const uint8_t *frame, size_t total, uint8_t *out,
     for (unsigned i = 0; i < TCP_CONNECTIONS; i++) {
         struct connection *candidate = &connections[i];
         if (candidate->state == FREE) free = candidate;
-        else if (candidate->peer_ip == peer && candidate->port == port && service == NET_ECHO_PORT)
+        else if (candidate->peer_ip == peer && candidate->port == port && service == candidate->service)
             c = candidate;
     }
     if (!c) {
         if (flags & RST) return 0;
-        if (service == NET_ECHO_PORT && (flags & (SYN|ACK|FIN)) == SYN && !len) {
+        if ((service == NET_ECHO_PORT || app_listening(service)) && (flags & (SYN|ACK|FIN)) == SYN && !len) {
             if (!free) return 0; /* fixed resource budget under SYN floods */
             c = free; memset(c, 0, sizeof *c);
-            c->state = SYN_RECEIVED; c->peer_ip = peer; c->port = (uint16_t)port;
+            c->state = SYN_RECEIVED; c->service = service; c->peer_ip = peer; c->port = (uint16_t)port;
             c->mss = (uint16_t)mss; c->window = be16(tcp + 14);
             memcpy(c->peer_mac, frame + 6, 6); memcpy(c->mac, mac, 6);
             c->receive = seq + 1; c->una = c->next = (serial += 65537) + (uint32_t)now;
@@ -122,7 +125,7 @@ size_t tcp_reply(const uint8_t *frame, size_t total, uint8_t *out,
         return n;
     }
     if (flags & RST) {
-        if (seq == c->receive) { memset(c, 0, sizeof *c); return 0; }
+        if (seq == c->receive) { if (c->app_id) app_tcp_gone(c->app_id); memset(c, 0, sizeof *c); return 0; }
         return ack_packet(c, out); /* an inexact RST cannot destroy state */
     }
     if (c->state == SYN_RECEIVED && (flags & (SYN|ACK|FIN)) == SYN &&
@@ -139,14 +142,31 @@ size_t tcp_reply(const uint8_t *frame, size_t total, uint8_t *out,
     if (before(c->una, ack)) c->una = ack;
     if (released) {
         c->pending_len = 0;
-        if (c->state == LAST_ACK) { memset(c, 0, sizeof *c); return 0; }
-        if (c->state == SYN_RECEIVED) c->state = ESTABLISHED;
+        if (c->state == LAST_ACK) { if (c->app_id) app_tcp_gone(c->app_id); memset(c, 0, sizeof *c); return 0; }
+        if (c->state == SYN_RECEIVED) {
+            c->state = ESTABLISHED;
+            if (c->service != NET_ECHO_PORT) {
+                c->app_id = (unsigned)(c - connections) + 1;
+                if (!app_tcp_open(c->app_id, c->service, c->peer_ip, c->port)) {
+                    size_t n = packet(c, out, c->next, RST|ACK, NULL, 0, 0);
+                    memset(c, 0, sizeof *c); return n;
+                }
+            }
+        }
     }
     c->window = be16(tcp + 14); c->idle = now + TCP_IDLE;
     uint32_t skip = c->receive - seq;
     if (skip > len) return ack_packet(c, out);
     data += skip; len -= skip;
     int fin = (flags & FIN) && skip <= (uint32_t)(total - 20 - header);
+    if (c->app_id) {
+        unsigned accepted = c->peer_fin ? 0 : app_tcp_receive(c->app_id, data, len);
+        c->receive += accepted;
+        if (!c->peer_fin && fin && accepted == len) {
+            c->receive++; c->peer_fin = 1; app_tcp_eof(c->app_id);
+        }
+        return len || fin || released || skip ? ack_packet(c, out) : 0;
+    }
     if (c->peer_fin) return c->pending_len ? retransmit(c, out) : ack_packet(c, out);
     if (c->pending_len) {
         if (!len && fin) { c->receive++; c->peer_fin = 1; }
@@ -170,6 +190,7 @@ size_t tcp_poll(uint8_t *out, uint64_t now)
         if (c->state == FREE) continue;
         if (now >= c->idle || (c->pending_len && now >= c->deadline && c->retries == TCP_RETRIES)) {
             size_t n = packet(c, out, c->una, RST|ACK, NULL, 0, 0);
+            if (c->app_id) app_tcp_gone(c->app_id);
             memset(c, 0, sizeof *c);
             return n;
         }
@@ -177,7 +198,21 @@ size_t tcp_poll(uint8_t *out, uint64_t now)
             c->deadline = now + (TCP_RTO << ++c->retries);
             return retransmit(c, out);
         }
-        if (!c->pending_len && c->peer_fin) return tracked(c, out, FIN|ACK, NULL, 0, now);
+        if (c->app_id && c->state == ESTABLISHED) {
+            if (!c->pending_len) {
+                uint8_t data[TCP_MSS];
+                unsigned limit = c->window < c->mss ? c->window : c->mss;
+                unsigned n = app_tcp_send(c->app_id, data, limit);
+                if (n) return tracked(c, out, PSH|ACK, data, n, now);
+                if (app_tcp_closing(c->app_id)) {
+                    if (c->peer_fin) return tracked(c, out, FIN|ACK, NULL, 0, now);
+                    size_t size = packet(c, out, c->next, RST|ACK, NULL, 0, 0);
+                    app_tcp_gone(c->app_id); memset(c, 0, sizeof *c); return size;
+                }
+            }
+            if (c->advertised != app_tcp_space(c->app_id)) return ack_packet(c, out);
+        }
+        if (!c->app_id && !c->pending_len && c->peer_fin) return tracked(c, out, FIN|ACK, NULL, 0, now);
     }
     return 0;
 }

@@ -50,7 +50,7 @@ ULIB_SRCS := $(wildcard user/lib/*.c user/lib/*.S)
 ULIB_OBJS := $(patsubst %,$(BUILD)/%.o,$(basename $(ULIB_SRCS)))
 
 # Programs: user/<name>/*.c, linked with user/lib into build/user/<name>.elf.
-USER_PROGS := root console hello pci blk fs cat net
+USER_PROGS := root console hello pci blk fs cat net netsock
 USER_ELFS  := $(USER_PROGS:%=$(BUILD)/user/%.elf)
 MANIFESTS  := $(wildcard user/*.manifest)
 
@@ -70,7 +70,7 @@ QEMUFLAGS := -M q35 -m 256M -cpu qemu64 -smp 1 -no-reboot \
              -drive file=$(DISK),if=none,id=disk0,format=raw \
              -device virtio-blk-pci,drive=disk0,disable-legacy=off
 
-.PHONY: all iso run debug test net-demo net-serve net-sockets-test net-stack-test clean FORCE
+.PHONY: all iso run debug test net-demo net-serve net-sockets-test net-stack-test guest-sockets-test clean FORCE
 # The user_prog rules above come first, so name the default goal explicitly.
 .DEFAULT_GOAL := all
 
@@ -137,6 +137,7 @@ test: all limine/limine $(DISK) net-stack-test
 	@QEMU="$(QEMU)" QEMUFLAGS="$(QEMUFLAGS)" BUILD="$(BUILD)" sh scripts/test.sh
 	$(MAKE) net-demo
 	$(MAKE) net-sockets-test
+	$(MAKE) guest-sockets-test
 
 net-demo: all limine/limine $(DISK)
 	$(MAKE) -s iso ISO=$(BUILD)/net.iso CMDLINE=selftest=net-ping
@@ -145,12 +146,18 @@ net-demo: all limine/limine $(DISK)
 net-stack-test:
 	@mkdir -p $(BUILD)/tests
 	$(CC) -std=gnu11 -g -O1 -Wall -Wextra -Werror -fsanitize=address,undefined \
-	    -Iuser/net -Iuser/lib tests/NetStackTests.c user/net/stack.c user/net/tcp.c -o $(BUILD)/tests/net-stack
+	    -Iinclude -Iuser/net -Iuser/lib tests/NetStackTests.c user/net/stack.c user/net/tcp.c user/net/sockets.c -o $(BUILD)/tests/net-stack
 	ASAN_OPTIONS=detect_leaks=1 $(BUILD)/tests/net-stack
 
 net-sockets-test: all limine/limine $(DISK)
 	$(MAKE) -s iso ISO=$(BUILD)/net-serve.iso CMDLINE=selftest=net-serve
 	python3 scripts/net-sockets-test.py --qemu $(QEMU) --iso $(BUILD)/net-serve.iso --disk $(DISK) --log $(BUILD)/net-sockets.log
+
+guest-sockets-test: all limine/limine $(DISK)
+	$(MAKE) -s iso ISO=$(BUILD)/guest-sockets.iso CMDLINE=selftest=guest-sockets
+	python3 scripts/net-sockets-test.py --qemu $(QEMU) --iso $(BUILD)/guest-sockets.iso --disk $(DISK) --log $(BUILD)/guest-sockets.log --guest-client
+	$(MAKE) -s iso ISO=$(BUILD)/net-restart.iso CMDLINE=selftest=net-restart
+	python3 scripts/net-sockets-test.py --qemu $(QEMU) --iso $(BUILD)/net-restart.iso --disk $(DISK) --log $(BUILD)/net-restart.log --guest-client --restart
 
 # Persistent local services, reachable with ordinary host TCP/UDP sockets.
 net-serve: all limine/limine $(DISK)

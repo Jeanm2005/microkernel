@@ -5,6 +5,7 @@
 #include <abi/selftest.h>
 #include "root.h"
 #include "syscall.h"
+#include "ipc.h"
 #include "ulib.h"
 
 uint64_t rdtsc(void)
@@ -47,11 +48,19 @@ static void misbehave(long mode)
 
 int main(long mode)
 {
+    if (mode == ROOT_MODE_REVOKED) {
+        struct msg message = { .w = { 55 } };
+        check(sys_call(TEST_SLOT_EP, &message, 0) == -ERR_REVOKED,
+              "revocation cancels a blocked call across processes");
+        check(sys_cap_delete(TEST_SLOT_EP) == 0, "revoked capabilities remain deletable");
+        return failures ? 1 : 0;
+    }
     if (mode == ROOT_MODE_INIT || mode == ROOT_MODE_INIT_CRASH || mode == ROOT_MODE_INIT_INPUT ||
         mode == ROOT_MODE_INIT_RESTART || mode == ROOT_MODE_INIT_TIMEOUT ||
         mode == ROOT_MODE_INIT_REPEATED || mode == ROOT_MODE_INIT_EXHAUST ||
         mode == ROOT_MODE_INIT_BOOT_TIMEOUT || mode == ROOT_MODE_INIT_NOISY_TIMEOUT ||
-        mode == ROOT_MODE_INIT_NET || mode == ROOT_MODE_NET_SERVE || mode == ROOT_MODE_WATCHDOG)
+        mode == ROOT_MODE_INIT_NET || mode == ROOT_MODE_NET_SERVE || mode == ROOT_MODE_WATCHDOG || mode == ROOT_MODE_SOCKETS ||
+        mode == ROOT_MODE_NET_RESTART)
         return init_main(mode);
     if (mode == ROOT_MODE_IPC_SERVER || mode == ROOT_MODE_IPC_SERVER_CRASH)
         return ipc_server(mode);

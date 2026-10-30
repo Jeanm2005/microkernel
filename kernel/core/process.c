@@ -44,8 +44,10 @@ static bool map_stack(uint64_t root)
 
 static void free_process(struct process *p)
 {
-    if (p->exit_notification)
+    if (p->exit_notification) {
         kobj_put(&p->exit_notification->obj);
+        cap_use_put(p->exit_authority);
+    }
     slab_free(&process_cache, p);
 }
 
@@ -178,7 +180,9 @@ void process_thread_gone(struct process *p)
         p->exit_notification = NULL;
         ntfn_signal(n, p->exit_bits);
         kobj_put(&n->obj);
+        cap_use_put(p->exit_authority); p->exit_authority = NULL;
     }
+    p->thread = NULL;
     struct thread *t;
     while ((t = waitq_pop(&p->exit_waiters)))
         sched_wake(t);
@@ -264,6 +268,7 @@ int64_t copy_from_user(void *dst, uint64_t src, uint64_t len)
 void process_watchdog_check(void)
 {
     struct process *p = thread_current()->proc;
+    if (p && p->stop_requested) process_kill_current("SUPERVISOR STOP");
     if (p && p->watchdog_deadline && thread_current()->run_ticks >= p->watchdog_deadline)
         process_kill_current("CPU WATCHDOG");
 }
