@@ -209,7 +209,8 @@ static long irq(struct device *d, long *cap)
  * stays pinned until bus mastering is disabled and the device is reset. */
 static long recover(struct device *d)
 {
-    if (d->vendor != PCI_VENDOR_VIRTIO || d->device != PCI_DEVICE_VIRTIO_BLK)
+    if (d->vendor != PCI_VENDOR_VIRTIO ||
+        (d->device != PCI_DEVICE_VIRTIO_BLK && d->device != PCI_DEVICE_VIRTIO_NET))
         return -ERR_NOSYS;
     uint32_t bar0 = cfg_read32(d->addr, CFG_BAR0);
     if (!(bar0 & 1) || !(bar0 & ~3u)) return -ERR_INVAL;
@@ -280,7 +281,8 @@ int main(void)
                 break;
             case PCI_PIN_DMA: {
                 long pages;
-                if (d->vendor != PCI_VENDOR_VIRTIO || d->device != PCI_DEVICE_VIRTIO_BLK)
+                if (d->vendor != PCI_VENDOR_VIRTIO ||
+                    (d->device != PCI_DEVICE_VIRTIO_BLK && d->device != PCI_DEVICE_VIRTIO_NET))
                     reply[0] = -ERR_NOSYS;
                 else if (d->dma_cap)
                     reply[0] = -ERR_EXIST;

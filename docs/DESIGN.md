@@ -88,11 +88,13 @@ user/
   blk/            the virtio-blk server (legacy PCI virtqueue and DMA)
   fs/             read-only single-file filesystem
   cat/            file reader using only the filesystem and console
+  net/            legacy virtio-net driver and Ethernet/ARP/IPv4/ICMP stack
   disk/           source file for the generated disk image
   hello/          a console client
   *.manifest      which programs the root task starts, and with what
   linker.ld       user programs load at 0x400000
 scripts/test.sh   boot-and-check test runner (`make test`)
+scripts/net-test.py  host Ethernet peer and ICMP integration test
 docs/DESIGN.md
 limine.conf       loads the user programs and manifests as boot modules
 ```
@@ -527,8 +529,8 @@ UART, which discards it.
     with uncached mappings.
   - Legacy interrupts only (INTx, routed by the firmware to a PIC line).
     MSI needs the IOAPIC/LAPIC path and is deferred with it.
-  - Device recovery is implemented only for the legacy virtio block
-    device. Other devices keep their claims until the PCI server exits.
+  - Device reset and DMA-pin cleanup support legacy virtio block and
+    network devices; automatic restart policy currently covers only the disk. Other devices keep their claims until the PCI server exits.
 
 ## Disk I/O and tiny filesystem (M8b)
 
@@ -599,7 +601,7 @@ DMA memory must outlive a faulting driver. Before enabling its virtqueue the
 driver transfers a frame capability to the PCI server using `PCI_PIN_DMA`.
 The PCI server keeps that frame alive even after process teardown. Only root
 can call `PCI_RECOVER`, and does so after observing the old process's death.
-For the supported legacy virtio block device, recovery disables PCI bus
+For the supported legacy virtio block and network devices, recovery disables PCI bus
 mastering, resets device status and confirms reset, masks/unbinds the IRQ,
 then drops the pinned frame and releases the claim. The replacement can
 claim the device again. PCI command writes use 16-bit accesses to avoid
@@ -653,6 +655,59 @@ revocation or arbitrary server supervision. PCI and the supervisor are trusted;
 recovery must not run while the old driver is alive. No IOMMU or protection
 against a malicious bus-mastering driver is provided. A driver stuck in a CPU loop or an unrelated IPC call still needs an
 external watchdog; the deadline bounds the driver's completion wait only.
+
+## Networking (M10)
+
+The ping milestone uses `net.manifest`: console, PCI and one isolated `net`
+process containing the driver and minimal IP stack. Storage uses its original
+manifest. All packet processing runs in ring 3; the kernel has no networking
+code or new networking syscalls. The PCI server grants the NIC's BAR and IRQ
+only after claim, and pins the driver's single DMA frame until device reset,
+just as for the disk. Network-specific automatic restart is not implemented.
+
+The legacy virtio-net interface has two queues, RX (0) and TX (1). Only the
+MAC feature is negotiated; checksumming is done in software and no GSO or
+merged buffers are accepted. Each descriptor chain separates the 10-byte
+legacy network header from the Ethernet payload, as required without
+ANY_LAYOUT. Sixteen RX chains are posted and recycled after processing;
+TX permits one outstanding chain and waits up to one second for completion.
+Receive waits have a ten-second overall demo deadline. Queue memory and
+all packet buffers occupy one contiguous, zeroed frame within the driver's
+32-page quota. The used indices, IDs and lengths are checked before accessing
+buffers. Both normal and failed exits reset the NIC before teardown; PCI
+retains the frame through its own reset and IRQ unbind at shutdown.
+
+The stack in `user/net/stack.c` parses bytes without packed-structure or
+alignment assumptions. It implements Ethernet, ARP request/reply and IPv4
+ICMP echo request/reply at static IP `10.0.2.15`, with MTU 1500. It validates
+Ethernet destinations, ARP layout and sender addresses, IP and ICMP checksums,
+packet lengths, TTL, protocol, fragment flags and destination IP. Echo replies
+preserve identifier, sequence and payload and recalculate checksums; minimum
+Ethernet frames are zero padded. Unsupported or malformed frames are dropped.
+This is the ping subset of the planned TCP/IP suite: TCP, UDP, sockets,
+DHCP, DNS, IPv6, IP options, fragmentation/reassembly and routing are not
+implemented. Driver and stack share one process in this milestone.
+
+`make net-demo` builds a network-test ISO and runs `scripts/net-test.py`.
+Python and QEMU share a local stream socket pair, carrying length-prefixed
+Ethernet frames; no Internet, TAP setup or raw-socket privileges are needed.
+The host sends ARP, validates the exact reply, sends nine malformed or
+unsupported frames, and then checks 260 ICMP replies byte for byte. Payloads
+include zero bytes, odd lengths and the MTU limit. The run reuses all RX
+buffers and crosses the 256-entry ring positions. The guest exits after
+260 echo replies; root shuts down PCI and console, and the kernel checks
+that every frame was reclaimed. `make test` runs this after the existing
+20 boot regressions. Logs are in `build/net-demo.log`. This peer is a small
+host ping implementation, not the host OS's `ping` command.
+
+The driver layout follows the
+[OASIS virtio legacy network specification](https://docs.oasis-open.org/virtio/virtio/v1.0/cs03/virtio-v1.0-cs03.html).
+The host link uses QEMU's
+[socket network backend](https://www.qemu.org/docs/master/system/qemu-manpage.html).
+A TAP backend could connect the same packets to a host network, but this
+demo does not configure one. The legacy PIC path cannot share an IRQ between
+independent drivers, so simultaneous disk/NIC use needs distinct interrupt
+lines or future interrupt-routing support.
 
 ## Syscall ABI
 
@@ -715,7 +770,7 @@ object types and error codes live in `include/abi/syscall.h`.
 | **M8a** | Memory capabilities + PCI server | a driver gets a frame from its own quota and maps it; the PCI server hands it exactly its disk's ports and IRQ; it reads the disk's size from the device ✅ |
 | **M8b** | virtio-blk driver + tiny FS server | `cat` prints `hello.txt` from disk; DMA read/write, IRQ completion and leak checks pass ✅ |
 | **M9** | Fault supervision + restart | disk driver faults after DMA submission; root resets and restarts it, filesystem retries, `cat` finishes, no frames leak ✅ |
-| M10 | virtio-net + user-space TCP/IP stack (stretch) | ping the guest |
+| **M10** | virtio-net + minimal user-space IP stack (ping subset) | host resolves ARP and validates 260 guest echo replies, malformed frames are dropped, and no frames leak ✅; TCP/UDP remain future work |
 
 #PF = page fault, #DF = double fault.
 

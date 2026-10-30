@@ -395,6 +395,7 @@ int init_main(long mode)
 {
     const char *file = mode == ROOT_MODE_INIT_CRASH ? "crash.manifest"
                      : mode == ROOT_MODE_INIT_INPUT ? "input.manifest"
+                     : mode == ROOT_MODE_INIT_NET ? "net.manifest"
                      : "system.manifest";
     find_modules();
     long mod = module_slot(file);

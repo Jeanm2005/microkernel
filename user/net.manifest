@@ -1,0 +1,5 @@
+# Network demo: the host sends ARP and ICMP using QEMU's socket backend.
+# name image priority provides uses devices quota arg
+console console.elf 200 console - com1 - 0
+pci pci.elf 180 pci console pci 16/0 0
+net net.elf 150 - console,pci - 4/32 260

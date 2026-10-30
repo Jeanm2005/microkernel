@@ -50,7 +50,7 @@ ULIB_SRCS := $(wildcard user/lib/*.c user/lib/*.S)
 ULIB_OBJS := $(patsubst %,$(BUILD)/%.o,$(basename $(ULIB_SRCS)))
 
 # Programs: user/<name>/*.c, linked with user/lib into build/user/<name>.elf.
-USER_PROGS := root console hello pci blk fs cat
+USER_PROGS := root console hello pci blk fs cat net
 USER_ELFS  := $(USER_PROGS:%=$(BUILD)/user/%.elf)
 MANIFESTS  := $(wildcard user/*.manifest)
 
@@ -70,7 +70,7 @@ QEMUFLAGS := -M q35 -m 256M -cpu qemu64 -smp 1 -no-reboot \
              -drive file=$(DISK),if=none,id=disk0,format=raw \
              -device virtio-blk-pci,drive=disk0,disable-legacy=off
 
-.PHONY: all iso run debug test clean FORCE
+.PHONY: all iso run debug test net-demo clean FORCE
 # The user_prog rules above come first, so name the default goal explicitly.
 .DEFAULT_GOAL := all
 
@@ -135,6 +135,11 @@ debug: iso $(DISK)
 
 test: all limine/limine $(DISK)
 	@QEMU="$(QEMU)" QEMUFLAGS="$(QEMUFLAGS)" BUILD="$(BUILD)" sh scripts/test.sh
+	$(MAKE) net-demo
+
+net-demo: all limine/limine $(DISK)
+	$(MAKE) -s iso ISO=$(BUILD)/net.iso CMDLINE=selftest=net-ping
+	python3 scripts/net-test.py --qemu $(QEMU) --iso $(BUILD)/net.iso --disk $(DISK) --log $(BUILD)/net-demo.log
 
 clean:
 	rm -rf $(BUILD)

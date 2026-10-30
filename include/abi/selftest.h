@@ -15,6 +15,7 @@ enum root_mode {
     ROOT_MODE_IPC_CLIENT_ORPHAN = 7,  /* client that expects -ERR_DEAD */
 
     /* The real job: start the system described by a manifest. */
+    ROOT_MODE_INIT_NET    = 17, /* net.manifest: Ethernet ping demo */
     ROOT_MODE_INIT        = 8,  /* system.manifest */
     ROOT_MODE_INIT_CRASH  = 9,  /* crash.manifest: one application crashes */
     ROOT_MODE_INIT_NOISY_TIMEOUT = 16, /* pending bits must not extend the request deadline */

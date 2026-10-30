@@ -7,7 +7,7 @@ can crash and be restarted without taking the system down.
 
 See [docs/DESIGN.md](docs/DESIGN.md) for the architecture and milestones.
 
-**Status:** M9 of 10 done.
+**Status:** M0–M10 demo acceptance tests complete. Networking currently supports ARP and IPv4/ICMP ping.
 
 - M0: boots via Limine on QEMU, serial console, memory map
 - M1: own GDT (Global Descriptor Table), TSS (Task State Segment) and IDT
@@ -34,12 +34,16 @@ See [docs/DESIGN.md](docs/DESIGN.md) for the architecture and milestones.
   a virtio disk driver performs DMA reads and writes with IRQ completion;
   a tiny read-only filesystem server and `cat` client print `hello.txt`
   from disk
-
 - M9: the root task watches child exits and restarts a faulting disk
   driver up to three times, preserving its service endpoint and client badges; the PCI
   server pins DMA memory until reset, and the filesystem retries its read;
   disk requests have one-second deadlines, with explicit I/O errors after
   the restart budget is exhausted
+
+- M10: a user-space virtio-net driver and minimal IP stack answer ARP and
+  ICMP echo at `10.0.2.15`; the host validates 260 pings, malformed packet
+  rejection, virtqueue reuse and complete memory reclamation. TCP/UDP
+  transports, DHCP and routing are future work.
 
 ## Build and run
 
@@ -48,7 +52,8 @@ Requirements: `python3`, `gcc`, `binutils`, `make`, `git`, `xorriso`, `qemu-syst
 
 ```sh
 make run     # build ISO and boot in QEMU, serial output in the terminal (Ctrl+C to quit)
-make test    # boot once per test case in scripts/test.sh and check the output
+make test    # boot regression cases, then run the host-to-guest network test
+make net-demo # ping the guest over a local Ethernet socket pair; no TAP/root needed
 make debug   # QEMU waits for GDB: gdb build/kernel.elf -ex 'target remote :1234'
 
 make run CMDLINE="selftest=pagefault"     # watch a page-fault report
@@ -73,3 +78,9 @@ To turn a backtrace address into a source line:
 ```sh
 addr2line -e build/kernel.elf -f -p 0xffffffff800020ec
 ```
+The network demo uses `net.manifest`, separate from the storage demo. Its
+static address is `10.0.2.15` and MAC is `52:54:00:12:34:56`. `make net-demo`
+uses a Python ICMP peer on QEMU's Ethernet socket backend; it needs no
+Internet connection, TAP interface, or privileged host `ping` socket. See
+[docs/DESIGN.md](docs/DESIGN.md#networking-m10) for the supported protocols
+and current limits.
