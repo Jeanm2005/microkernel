@@ -23,7 +23,7 @@ struct mem_region {
 
 #define BOOT_MAX_REGIONS 128
 #define BOOT_CMDLINE_MAX 256
-#define BOOT_MAX_MODULES 8
+#define BOOT_MAX_MODULES 16
 
 /* A file the bootloader loaded next to the kernel (e.g. the root task).
  * It sits in MEM_KERNEL_AND_MODULES memory, which is never reclaimed. */

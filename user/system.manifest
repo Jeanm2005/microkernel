@@ -18,5 +18,7 @@
 # name      image         priority  provides  uses              devices  quota  arg
 console     console.elf   200       console   -                 com1     -      0
 pci         pci.elf       180       pci       console           pci      16/0   0
-blk         blk.elf       150       -         console,pci,pci   -        4/8    0
+blk         blk.elf       150       blk       console,pci,pci   -        4/8    0
 hello       hello.elf     100       -         console           -        -      0
+fs          fs.elf        140       fs        console,blk       -        -      0
+cat         cat.elf       100       -         console,fs        -        -      0

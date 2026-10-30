@@ -34,7 +34,7 @@ int64_t sys_frame_alloc(struct cspace *cs, int64_t factory_slot, uint64_t pages)
     if (!enough)
         return -ERR_NOMEM;
 
-    struct frame *fr = (struct frame *)kobj_create(KOBJ_Frame, f);
+    struct frame *fr = (struct frame *)kobj_create(KOBJ_FRAME, f);
     uint64_t phys = fr ? pmm_alloc_contig(pages) : PMM_NONE;
     if (phys == PMM_NONE) {
         if (fr)

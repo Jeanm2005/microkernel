@@ -1,19 +1,8 @@
-/* First step of the virtio-blk (virtual block device) driver: everything
- * up to the point where it can talk to the disk.
- *
- * It checks the memory capabilities it will need for DMA buffers (a frame
- * from its own quota, mapped into its address space, with a physical
- * address to give the device), then asks the PCI server for the disk:
- * claims it, receives its I/O ports and interrupt line as capabilities,
- * and reads the disk's size from the device's own registers. Reading and
- * writing blocks (the virtqueue) is the next step.
- *
- * The device is QEMU's virtio-blk in "transitional" mode, which still
- * offers the legacy virtio interface: registers in an I/O-port BAR (base
- * address register) instead of memory-mapped ones. */
+/* Legacy virtio-blk server: one DMA request at a time, completed by IRQ. */
 #include <stdint.h>
 #include <abi/boot.h>
 #include <abi/pci.h>
+#include <abi/storage.h>
 #include "io.h"
 #include "ipc.h"
 #include "ulib.h"
@@ -89,6 +78,121 @@ static long pci(long op, long a1, long a2, long *out1, long *cap)
     return pci_on(PCI, op, a1, a2, out1, cap);
 }
 
+/* Queue layout follows the legacy PCI transport: used ring page-aligned.
+ * x86 DMA is coherent; full barriers order publication and completion. */
+struct desc { uint64_t addr; uint32_t len; uint16_t flags, next; };
+struct request { uint32_t type, reserved; uint64_t sector; };
+static volatile struct desc *desc;
+static volatile uint16_t *avail, *used;
+static volatile struct request *request;
+static volatile uint8_t *data, *status;
+static uint64_t dma_phys;
+static uint16_t qsize, submitted, completed, base;
+static long events, disk_irq;
+
+static void barrier(void) { __sync_synchronize(); }
+
+static int queue_init(void)
+{
+    outl(base + 4, 0);   /* negotiate no optional features */
+    outw(base + 14, 0);  /* request queue */
+    qsize = inw(base + 12);
+    if (qsize < 3 || qsize > 256 || (qsize & (qsize - 1)))
+        return -1;
+    unsigned used_offset = (16u * qsize + 6u + 2u * qsize + 4095) & ~4095u;
+    unsigned bytes = used_offset + 6u + 8u * qsize;
+    unsigned request_offset = (bytes + 4095) & ~4095u;
+    unsigned pages = (request_offset + 16 + 512 + 1 + 4095) / 4096;
+    long frame = sys_frame_alloc(SLOT_FACTORY, pages), n;
+    long phys = frame > 0 ? sys_frame_info(frame, &n) : -1;
+    if (phys <= 0 || (uint64_t)phys >> 44 || sys_map(frame, BUF, 1))
+        return -1;
+    dma_phys = (uint64_t)phys;
+    desc = (void *)BUF;
+    avail = (void *)(BUF + 16u * qsize);
+    used = (void *)(BUF + used_offset);
+    request = (void *)(BUF + request_offset);
+    data = (void *)(BUF + request_offset + 16);
+    status = data + 512;
+    desc[0] = (struct desc){ dma_phys + request_offset, 16, 1, 1 };
+    desc[1] = (struct desc){ dma_phys + request_offset + 16, 512, 3, 2 };
+    desc[2] = (struct desc){ dma_phys + request_offset + 528, 1, 2, 0 };
+    barrier();
+    outl(base + 8, (uint32_t)(dma_phys >> 12));
+    outb(base + VIRTIO_STATUS, STATUS_ACKNOWLEDGE | STATUS_DRIVER | 4);
+    return 0;
+}
+
+static int transfer(uint64_t sector, int write)
+{
+    request->type = write ? 1 : 0;
+    request->reserved = 0;
+    request->sector = sector;
+    *status = 0xff;
+    desc[1].flags = write ? 1 : 3;
+    avail[2 + submitted % qsize] = 0;
+    barrier();
+    avail[1] = ++submitted;
+    barrier();
+    outw(base + 16, 0);
+    /* Always consume the notification and deassert INTx before unmasking.
+     * A pending notification closes the completion-before-wait race. */
+    for (;;) {
+        long bits;
+        if (sys_wait(events, &bits))
+            return -1;
+        (void)inb(base + 19);
+        if (sys_irq_ack(disk_irq))
+            return -1;
+        barrier();
+        if (used[1] != completed)
+            break;
+    }
+    volatile uint32_t *entry = (void *)&used[2 + 4u * (completed % qsize)];
+    if (used[1] != (uint16_t)(completed + 1) || entry[0] != 0)
+        return -1;
+    completed++;
+    return *status == 0 ? 0 : -1;
+}
+
+static int serve(uint64_t sectors)
+{
+    struct msg m;
+    if (sys_recv(SLOT_SERVE, &m))
+        return 1;
+    for (;;) {
+        long reply[4] = { -ERR_INVAL, 0, 0, 0 };
+        int stop = 0;
+        switch (PROTO_OP(m.w[0])) {
+        case PROTO_SHUTDOWN:
+            reply[0] = m.badge ? -ERR_PERM : 0;
+            stop = !m.badge;
+            break;
+        case BLK_SIZE: reply[0] = (long)sectors; break;
+        case BLK_READ:
+            if ((uint64_t)m.w[1] < sectors && m.w[2] >= 0 && m.w[2] < 512 &&
+                m.w[3] > 0 && m.w[3] <= STORAGE_CHUNK && m.w[3] <= 512 - m.w[2]) {
+                if (transfer((uint64_t)m.w[1], 0))
+                    reply[0] = -ERR_DEAD;
+                else {
+                    reply[0] = m.w[3];
+                    for (long i = 0; i < m.w[3]; i++)
+                        ((uint8_t *)&reply[1])[i] = data[m.w[2] + i];
+                }
+            }
+            break;
+        }
+        if (m.cap > 0) sys_cap_delete(m.cap);
+        if (stop) {
+            outb(base + VIRTIO_STATUS, 0); /* stop DMA before process teardown */
+            sys_reply(reply, 0);
+            return failures ? 1 : 0;
+        }
+        if (sys_reply_recv(SLOT_SERVE, reply, 0, &m))
+            return 1;
+    }
+}
+
 int main(void)
 {
     printf_use_console(CONSOLE);
@@ -128,13 +232,35 @@ int main(void)
     printf("disk: %lu sectors of 512 bytes (%lu KiB), features 0x%08x\n", sectors, sectors / 2,
            features);
     check(sectors > 0, "read the disk's size from the device itself");
-    outb((uint16_t)(ports + VIRTIO_STATUS), 0);   /* reset: leave it as we found it */
+
 
     /* The interrupt line will signal a notification made from our quota. */
     long ntfn = sys_obj_create(SLOT_FACTORY, OBJ_NOTIFICATION);
     check(ntfn > 0 && sys_irq_bind(irq_cap, ntfn, 1) == 0,
           "bound the disk's interrupt to a notification from its own quota");
 
+    base = (uint16_t)ports;
+    events = ntfn;
+    disk_irq = irq_cap;
+    if (failures || queue_init()) {
+        outb(base + VIRTIO_STATUS, 0);
+        return 1;
+    }
+    /* Last sector is scratch space, outside the tiny filesystem. Restore
+     * it after testing writes so repeated boots see identical contents. */
+    uint8_t saved[512];
+    int ok = transfer(sectors - 1, 0) == 0;
+    if (ok) {
+        for (int i = 0; i < 512; i++) { saved[i] = data[i]; data[i] = (uint8_t)i; }
+        ok = transfer(sectors - 1, 1) == 0 && transfer(sectors - 1, 0) == 0;
+        for (int i = 0; i < 512; i++) {
+            if (data[i] != (uint8_t)i) ok = 0;
+            data[i] = saved[i];
+        }
+        if (transfer(sectors - 1, 1)) ok = 0;
+    }
+    check(ok, "DMA read/write round trip completed through IRQ notifications");
     printf("done, %d failure(s)\n", failures);
-    return failures ? 1 : 0;
+    if (failures) { outb(base + VIRTIO_STATUS, 0); return 1; }
+    return serve(sectors);
 }

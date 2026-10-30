@@ -50,7 +50,7 @@ ULIB_SRCS := $(wildcard user/lib/*.c user/lib/*.S)
 ULIB_OBJS := $(patsubst %,$(BUILD)/%.o,$(basename $(ULIB_SRCS)))
 
 # Programs: user/<name>/*.c, linked with user/lib into build/user/<name>.elf.
-USER_PROGS := root console hello pci blk
+USER_PROGS := root console hello pci blk fs cat
 USER_ELFS  := $(USER_PROGS:%=$(BUILD)/user/%.elf)
 MANIFESTS  := $(wildcard user/*.manifest)
 
@@ -65,7 +65,7 @@ USER_OBJS := $(foreach p,$(USER_PROGS),$($(p)_OBJS))
 # The disk: a virtio block device in "transitional" mode, so it keeps the
 # legacy virtio interface (registers in I/O ports) next to the modern one.
 DISK      := $(BUILD)/disk.img
-QEMUFLAGS := -M q35 -m 256M -cpu qemu64 -smp 1 -no-reboot -no-shutdown \
+QEMUFLAGS := -M q35 -m 256M -cpu qemu64 -smp 1 -no-reboot \
              -serial stdio -display none \
              -drive file=$(DISK),if=none,id=disk0,format=raw \
              -device virtio-blk-pci,drive=disk0,disable-legacy=off
@@ -123,10 +123,9 @@ $(ISO): $(BUILD)/kernel.elf $(USER_ELFS) $(MANIFESTS) limine.conf limine/limine 
 	    $@.root -o $@ 2>/dev/null
 	./limine/limine bios-install $@ 2>/dev/null
 
-# A blank 1 MiB disk for now.
-$(DISK):
-	@mkdir -p $(dir $@)
-	head -c 1048576 /dev/zero > $@
+# A reproducible tiny filesystem image, rebuilt when its contents change.
+$(DISK): scripts/mkdisk.py user/disk/hello.txt
+	python3 scripts/mkdisk.py user/disk/hello.txt $@
 
 run: iso $(DISK)
 	$(QEMU) $(QEMUFLAGS) -cdrom $(ISO)

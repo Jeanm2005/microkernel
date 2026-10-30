@@ -111,7 +111,7 @@ run_case boot "" 1 \
     "[pong] quitting" \
     "[ping] done, 0 failure(s)" \
     "selftest: ipc ok" \
-    "[root] read system.manifest: 4 programs" \
+    "[root] read system.manifest: 6 programs" \
     "[root] ok: can't create a process above its own priority" \
     "[root] ok: a process image must come from a module capability" \
     "[root] ok: a process that was never started can be discarded" \
@@ -141,7 +141,22 @@ run_case boot "" 1 \
     "[blk] ok: received the device's interrupt line as a capability" \
     "[blk] disk: 2048 sectors of 512 bytes (1024 KiB)" \
     "[blk] ok: bound the disk's interrupt to a notification from its own quota" \
+    "[blk] ok: DMA read/write round trip completed through IRQ notifications" \
     "[blk] done, 0 failure(s)" \
+    "[fs] ok: block server rejects reads beyond disk capacity" \
+    "[fs] ok: block server rejects chunks crossing a sector boundary" \
+    "[fs] ok: block server refuses client shutdown" \
+    "[fs] mounted hello.txt" \
+    "[cat] Hello from a file on the virtio disk!" \
+    "[cat] ok: filesystem rejects invalid reads" \
+    "[cat] ok: missing file is refused" \
+    "[cat] End of the file: the second sector arrived intact." \
+    "[cat] ok: filesystem refuses client shutdown" \
+    "[cat] ok: EOF returns zero bytes" \
+    "[cat] ok: read the complete file from disk through the filesystem" \
+    "[root] cat exited with code 0" \
+    "[root] fs shut down" \
+    "[root] blk shut down" \
     "[hello] ok: holds only the capabilities its manifest line lists" \
     "[hello] ok: can send to the console but not receive from it" \
     "[hello] ok: printing through the kernel is refused; this line came through the console" \

@@ -1,0 +1,10 @@
+Hello from a file on the virtio disk!
+The filesystem and disk driver run in separate user processes.
+Each read travels from the client to the filesystem, then to the block server.
+Only the block server holds the disk's port and interrupt capabilities.
+It publishes a descriptor chain in physical memory and notifies the device.
+The device writes the data and completion status into the driver's DMA frame.
+An interrupt wakes the driver through a kernel notification capability.
+The filesystem validates offsets and returns small chunks through IPC.
+This file spans multiple sectors to exercise reads across a sector boundary.
+End of the file: the second sector arrived intact.

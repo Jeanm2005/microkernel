@@ -85,7 +85,10 @@ user/
                   also runs the kernel's user-mode and IPC tests
   console/        the console server: the COM1 serial driver
   pci/            the PCI server
-  blk/            the virtio-blk driver (so far: finds and probes the disk)
+  blk/            the virtio-blk server (legacy PCI virtqueue and DMA)
+  fs/             read-only single-file filesystem
+  cat/            file reader using only the filesystem and console
+  disk/           source file for the generated disk image
   hello/          a console client
   *.manifest      which programs the root task starts, and with what
   linker.ld       user programs load at 0x400000
@@ -512,7 +515,7 @@ UART, which discards it.
   interface (registers in an I/O BAR) next to the modern one. `blk`
   claims it, gets ports 0xc000-0xc07f and IRQ 11 (as routed by the
   firmware), enables the ports, and reads the capacity register: 2048
-  sectors. Reading and writing blocks is the second part of M8.
+  sectors. M8b adds the virtqueue and filesystem described below.
 - **Known compromises**:
   - Configuration access uses the legacy ports, which reach the first 256
     bytes of each function's configuration space. ECAM (the
@@ -525,6 +528,38 @@ UART, which discards it.
     MSI needs the IOAPIC/LAPIC path and is deferred with it.
   - A claim lasts until the PCI server exits; a driver that dies doesn't
     release its device yet (that's part of M9's restart story).
+
+## Disk I/O and tiny filesystem (M8b)
+
+The block server negotiates no optional virtio features and sets up legacy
+queue 0 in a contiguous frame from its page quota. The used ring starts
+on a 4 KiB boundary. A three-descriptor chain contains a request header,
+a 512-byte buffer, and device-written status. One request is outstanding
+at a time; memory barriers order publication and completion. An IRQ wakes
+`wait` on the driver's notification; reading the ISR deasserts INTx before
+`irq_ack` unmasks the PIC line. The device is reset before normal shutdown
+so it stops accessing the frame before process teardown.
+
+A boot self-test reads the last sector, writes a pattern, reads it back,
+and restores the original contents. Clients get a read-only block protocol:
+24-byte slices of a sector, with capacity and bounds checks. No arbitrary
+physical addresses or client pointers are accepted. See
+`include/abi/storage.h` for both storage protocols. Queue layout follows the
+[OASIS virtio legacy transport specification](https://docs.oasis-open.org/virtio/virtio/v1.0/cs04/virtio-v1.0-cs04.html).
+
+`scripts/mkdisk.py` builds a 1 MiB image from `user/disk/hello.txt`.
+Sector 0 holds a versioned magic, file size and bounded filename; file data
+starts at sector 1, with the last sector reserved for the DMA test. The
+filesystem validates this metadata and serves stat and byte reads, splitting
+requests that cross sector boundaries. It has only console and block
+capabilities. The `cat` process has only console and filesystem capabilities.
+The root task stops the filesystem before the block server and PCI server.
+
+This is deliberately a single-file, read-only filesystem with no directory
+or write API. The driver supports QEMU's legacy port interface, queues of
+3..256 descriptors (power of two), and coherent x86 DMA. Device timeouts,
+read-only disks, hot unplug and crash-safe DMA teardown belong to future
+work; normal operation currently requires a responsive writable disk.
 
 ## Drivers and modules
 
@@ -593,7 +628,7 @@ object types and error codes live in `include/abi/syscall.h`.
 | **M6** | Root task spawns servers from a manifest | the root task starts a console server and a client from `system.manifest`, each holding only the capabilities its line grants; one crashing application leaves the rest running ✅ |
 | **M7** | User-space serial console driver (IRQ via notification) | the console server drives COM1 with its own I/O ports and IRQ 4; programs the root task starts can only print through it; a line typed on the serial port reaches it by interrupt; a program touching the port without permission is killed ✅ |
 | **M8a** | Memory capabilities + PCI server | a driver gets a frame from its own quota and maps it; the PCI server hands it exactly its disk's ports and IRQ; it reads the disk's size from the device ✅ |
-| M8b | virtio-blk driver + tiny FS server | `cat` a file from disk |
+| **M8b** | virtio-blk driver + tiny FS server | `cat` prints `hello.txt` from disk; DMA read/write, IRQ completion and leak checks pass ✅ |
 | M9 | Fault supervision + restart | kill the disk driver, system survives |
 | M10 | virtio-net + user-space TCP/IP stack (stretch) | ping the guest |
 

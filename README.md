@@ -7,7 +7,7 @@ can crash and be restarted without taking the system down.
 
 See [docs/DESIGN.md](docs/DESIGN.md) for the architecture and milestones.
 
-**Status:** M7 of 10 done, M8 half done.
+**Status:** M8 of 10 done.
 
 - M0: boots via Limine on QEMU, serial console, memory map
 - M1: own GDT (Global Descriptor Table), TSS (Task State Segment) and IDT
@@ -28,14 +28,16 @@ See [docs/DESIGN.md](docs/DESIGN.md) for the architecture and milestones.
 - M7: the console server is a user-space serial driver: it holds COM1's
   I/O ports and IRQ 4 as capabilities, gets interrupts as notifications,
   and is the only way the programs it serves can print
-- M8 (first part): memory capabilities (frames a process maps into its
+- M8: memory capabilities (frames a process maps into its
   own address space, with per-program quotas) and a user-space PCI server
   that hands each driver only its own device's ports and interrupt line;
-  a virtio disk driver finds the disk and reads its size
+  a virtio disk driver performs DMA reads and writes with IRQ completion;
+  a tiny read-only filesystem server and `cat` client print `hello.txt`
+  from disk
 
 ## Build and run
 
-Requirements: `gcc`, `binutils`, `make`, `git`, `xorriso`, `qemu-system-x86_64`
+Requirements: `python3`, `gcc`, `binutils`, `make`, `git`, `xorriso`, `qemu-system-x86_64`
 (on Ubuntu/WSL2: `sudo apt install build-essential xorriso qemu-system-x86`).
 
 ```sh
