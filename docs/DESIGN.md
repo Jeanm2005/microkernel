@@ -123,7 +123,8 @@ Rule: `core/` never includes `<limine.h>` or uses inline asm; it goes through
   frame-pointer backtrace, then panics; in user mode it kills the process
   instead (M4). Of vectors 32–255, only the timer (0x30), the PIC's device
   lines (0x20–0x2f, M7) and spurious interrupts are expected; any other one
-  panics. From M9, faults in user threads go to the supervisor instead.
+  panics. Since M9 the supervisor also receives a notification after user-process
+  teardown; the report remains on the kernel log.
 - **RSP0**, the kernel stack the CPU loads when a ring-3 thread traps, is
   set in the TSS on every context switch (M3/M4).
 
@@ -526,8 +527,8 @@ UART, which discards it.
     with uncached mappings.
   - Legacy interrupts only (INTx, routed by the firmware to a PIC line).
     MSI needs the IOAPIC/LAPIC path and is deferred with it.
-  - A claim lasts until the PCI server exits; a driver that dies doesn't
-    release its device yet (that's part of M9's restart story).
+  - Device recovery is implemented only for the legacy virtio block
+    device. Other devices keep their claims until the PCI server exits.
 
 ## Disk I/O and tiny filesystem (M8b)
 
@@ -558,21 +559,64 @@ The root task stops the filesystem before the block server and PCI server.
 This is deliberately a single-file, read-only filesystem with no directory
 or write API. The driver supports QEMU's legacy port interface, queues of
 3..256 descriptors (power of two), and coherent x86 DMA. Device timeouts,
-read-only disks, hot unplug and crash-safe DMA teardown belong to future
-work; normal operation currently requires a responsive writable disk.
+read-only disks and hot unplug remain future work; normal operation requires
+a responsive writable disk. M9 adds pinned-buffer teardown during recovery.
 
 ## Drivers and modules
 
 - A "module" is a user-space program image (or a manifest) loaded by the
   bootloader. The root task starts the programs (see above).
-- **Supervision**: the root task holds a notification bound to each child's
-  fault handler. On a fault it tears the server down, restarts it, and
-  re-hands its caps. Clients see an IPC error and reconnect.
+- **Supervision**: the root task watches every child's exit through a
+  notification. For a disk-driver fault it resets the device, restarts the
+  process and re-hands its capabilities. The filesystem retries the call
+  using its existing endpoint capability (details below).
 - **Interfaces**: each server's message protocol is a versioned header in
   `include/abi/` shared by server and clients (`proto.h` for the common
   rules, `console.h`, ...). No IDL until hand-written protocols hurt.
 - **PCI**: a user-space PCI server enumerates devices and hands out
   per-device port and IRQ capabilities to drivers (since M8, see above).
+
+## Fault supervision and disk-driver restart (M9)
+
+`proc_watch(proc, notification, bits)` registers a notification before a
+process is started. It needs READ on the process and WRITE on the
+notification. The kernel holds a reference until teardown and signals after
+address-space and capability cleanup, for both ordinary exits and faults.
+`proc_poll` returns `-ERR_AGAIN` while running, `-ERR_DEAD` after a fault,
+or the normal exit code. Notifications may coalesce; status stays readable.
+A never-started process can still be discarded without producing an exit.
+
+Root now waits on a shared child-exit notification, using one bit per
+manifest entry. It polls signalled children, counts completed applications,
+and allows one automatic restart of a faulted block server. Other unexpected
+server exits are errors. The restarted driver gets the same service endpoint
+and the same client badges, with a fresh process, quota and event notification.
+This keeps queued calls reachable without redistributing endpoint capabilities.
+The filesystem retries a transport `-ERR_DEAD` once; it remains the same process.
+
+DMA memory must outlive a faulting driver. Before enabling its virtqueue the
+driver transfers a frame capability to the PCI server using `PCI_PIN_DMA`.
+The PCI server keeps that frame alive even after process teardown. Only root
+can call `PCI_RECOVER`, and does so after observing the old process's death.
+For the supported legacy virtio block device, recovery disables PCI bus
+mastering, resets device status and confirms reset, masks/unbinds the IRQ,
+then drops the pinned frame and releases the claim. The replacement can
+claim the device again. PCI command writes use 16-bit accesses to avoid
+writing back the adjacent write-one-to-clear status register.
+
+`selftest=driver-restart` injects a null-pointer fault after submitting a
+file-sector DMA request. The filesystem's in-flight call receives `-ERR_DEAD`,
+root recovers the disk, and the retry queues until the replacement receives.
+`cat` finishes the multi-sector file. Both the ordinary boot and restart
+test verify that all frames return after shutdown, including pinned buffers
+and the old IRQ notification. Permission tests cover process observation,
+IRQ unbinding and supervisor-only device recovery.
+
+Limits: this is bounded restart of this disk driver, not general capability
+revocation or arbitrary server supervision. PCI and the supervisor are trusted;
+recovery must not run while the old driver is alive. No IOMMU or protection
+against a malicious bus-mastering driver is provided. A device that never
+completes I/O still needs a timeout/watchdog policy.
 
 ## Syscall ABI
 
@@ -613,7 +657,10 @@ object types and error codes live in `include/abi/syscall.h`.
 | 27 | `factory_split(factory, objects, pages) -> slot` | a quota carved out of a factory |
 | 28 | `ioport_sub(factory, ioport, base, count) -> slot` | part of a port range |
 | 29 | `irq_get(factory, irq_control, line) -> slot` | each line claimed once |
-| later | `thread_create`, `cap_revoke` | M9 |
+| 30 | `proc_watch(proc, ntfn, bits)` | register exit notification before start; READ process, WRITE notification |
+| 31 | `proc_poll(proc) -> code` | nonblocking status; `-ERR_AGAIN` while running, `-ERR_DEAD` after a fault |
+| 32 | `irq_unbind(irq)` | WRITE; mask and release the old notification |
+| later | `thread_create`, `cap_revoke` | future work |
 
 ## Milestones
 
@@ -629,7 +676,7 @@ object types and error codes live in `include/abi/syscall.h`.
 | **M7** | User-space serial console driver (IRQ via notification) | the console server drives COM1 with its own I/O ports and IRQ 4; programs the root task starts can only print through it; a line typed on the serial port reaches it by interrupt; a program touching the port without permission is killed ✅ |
 | **M8a** | Memory capabilities + PCI server | a driver gets a frame from its own quota and maps it; the PCI server hands it exactly its disk's ports and IRQ; it reads the disk's size from the device ✅ |
 | **M8b** | virtio-blk driver + tiny FS server | `cat` prints `hello.txt` from disk; DMA read/write, IRQ completion and leak checks pass ✅ |
-| M9 | Fault supervision + restart | kill the disk driver, system survives |
+| **M9** | Fault supervision + restart | disk driver faults after DMA submission; root resets and restarts it, filesystem retries, `cat` finishes, no frames leak ✅ |
 | M10 | virtio-net + user-space TCP/IP stack (stretch) | ping the guest |
 
 #PF = page fault, #DF = double fault.

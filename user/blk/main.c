@@ -88,7 +88,8 @@ static volatile struct request *request;
 static volatile uint8_t *data, *status;
 static uint64_t dma_phys;
 static uint16_t qsize, submitted, completed, base;
-static long events, disk_irq;
+static long events, disk_irq, device_addr;
+static int crash_on_read;
 
 static void barrier(void) { __sync_synchronize(); }
 
@@ -117,6 +118,9 @@ static int queue_init(void)
     desc[0] = (struct desc){ dma_phys + request_offset, 16, 1, 1 };
     desc[1] = (struct desc){ dma_phys + request_offset + 16, 512, 3, 2 };
     desc[2] = (struct desc){ dma_phys + request_offset + 528, 1, 2, 0 };
+    /* The PCI server keeps a copy even if this process faults. */
+    struct msg pin = { .w = { PCI_PIN_DMA, device_addr } };
+    if (sys_call(PCI, &pin, frame) || pin.w[0]) return -1;
     barrier();
     outl(base + 8, (uint32_t)(dma_phys >> 12));
     outb(base + VIRTIO_STATUS, STATUS_ACKNOWLEDGE | STATUS_DRIVER | 4);
@@ -135,6 +139,10 @@ static int transfer(uint64_t sector, int write)
     avail[1] = ++submitted;
     barrier();
     outw(base + 16, 0);
+    if (crash_on_read && !write && sector == 1) {
+        printf("crashing during a filesystem request after DMA submission\n");
+        *(volatile int *)0 = 1;
+    }
     /* Always consume the notification and deassert INTx before unmasking.
      * A pending notification closes the completion-before-wait race. */
     for (;;) {
@@ -193,8 +201,9 @@ static int serve(uint64_t sectors)
     }
 }
 
-int main(void)
+int main(long arg)
 {
+    crash_on_read = arg != 0;
     printf_use_console(CONSOLE);
     check_memory();
 
@@ -204,11 +213,14 @@ int main(void)
         printf("FAILED: no virtio block device (%ld)\n", addr);
         return 1;
     }
+    device_addr = addr;
     printf("found the virtio block device at %02lx:%02lx.%lx\n", PCI_BUS(addr), PCI_DEV(addr),
            PCI_FN(addr));
     check(pci(PCI_BAR, addr, 0, 0, 0) == -ERR_PERM,
           "the PCI server hands out a device's ports only after it is claimed");
     check(pci(PCI_CLAIM, addr, 0, 0, 0) == 0, "claimed the device");
+    check(pci(PCI_RECOVER, addr, 0, 0, 0) == -ERR_PERM,
+          "only the supervisor may reset a claimed device");
     check(pci_on(PCI2, PCI_CLAIM, addr, 0, 0, 0) == -ERR_EXIST &&
               pci_on(PCI2, PCI_BAR, addr, 0, 0, 0) == -ERR_PERM,
           "another client can neither claim it nor get its ports");
@@ -239,6 +251,10 @@ int main(void)
     check(ntfn > 0 && sys_irq_bind(irq_cap, ntfn, 1) == 0,
           "bound the disk's interrupt to a notification from its own quota");
 
+    long ro_irq = sys_cap_copy(irq_cap, CAP_READ, 0);
+    check(ro_irq > 0 && sys_irq_unbind(ro_irq) == -ERR_PERM,
+          "a read-only IRQ capability cannot disconnect the driver");
+    sys_cap_delete(ro_irq);
     base = (uint16_t)ports;
     events = ntfn;
     disk_irq = irq_cap;

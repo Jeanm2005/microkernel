@@ -5,6 +5,8 @@
  * address space yet. What moved to user space is the policy: which
  * programs run, at what priority, and with which capabilities. */
 #include <abi/syscall.h>
+#include <arch/cpu.h>
+#include <kernel/ipc.h>
 #include <kernel/cap.h>
 #include <kernel/object.h>
 #include <kernel/process.h>
@@ -135,6 +137,40 @@ int64_t sys_proc_wait(struct cspace *cs, int64_t proc, uint64_t *code)
     process_wait(p);
     if (p->killed)
         return -ERR_DEAD;
+    *code = (uint64_t)(int64_t)p->exit_code;
+    return 0;
+}
+
+/* Register before start so exit cannot race observation. A notification is
+ * only a hint; poll is authoritative and its result remains available. */
+int64_t sys_proc_watch(struct cspace *cs, int64_t proc, int64_t ntfn, uint64_t bits)
+{
+    struct process *p;
+    struct cap *nc;
+    int64_t err = lookup_proc(cs, proc, CAP_READ, &p);
+    if (!err) err = cspace_lookup(cs, ntfn, KOBJ_NOTIFICATION, CAP_WRITE, &nc);
+    if (err) return err;
+    if (!bits) return -ERR_INVAL;
+    uint64_t flags = irq_save();
+    if (p->started) { irq_restore(flags); return -ERR_INVAL; }
+    struct notification *n = (struct notification *)nc->obj;
+    struct notification *old = p->exit_notification;
+    kobj_get(&n->obj);
+    p->exit_notification = n;
+    p->exit_bits = bits;
+    irq_restore(flags);
+    if (old) kobj_put(&old->obj);
+    return 0;
+}
+
+int64_t sys_proc_poll(struct cspace *cs, int64_t proc, uint64_t *code)
+{
+    struct process *p;
+    int64_t err = lookup_proc(cs, proc, CAP_READ, &p);
+    if (err) return err;
+    if (!p->started) return -ERR_INVAL;
+    if (!p->exited) return -ERR_AGAIN;
+    if (p->killed) return -ERR_DEAD;
     *code = (uint64_t)(int64_t)p->exit_code;
     return 0;
 }

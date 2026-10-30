@@ -69,6 +69,10 @@ enum syscall_nr {
     SYS_IOPORT_SUB  = 28,  /* (factory, ioport, base, count) -> new slot for a sub-range */
     SYS_IRQ_GET     = 29,  /* (factory, irq_control, line) -> new IRQ slot; once per line */
 
+    SYS_PROC_WATCH  = 30,  /* (proc, ntfn, bits) -> 0; notify after teardown; before start */
+    SYS_PROC_POLL   = 31,  /* (proc) -> like wait, but -ERR_AGAIN while running */
+    SYS_IRQ_UNBIND  = 32,  /* (irq) -> 0; mask line and release its notification */
+
     SYS_COUNT
 };
 
@@ -107,6 +111,7 @@ enum syscall_nr {
 /* Errors (returned negated). */
 #define ERR_PERM    1    /* the capability lacks a needed right, or the
                             process may not do this at all */
+#define ERR_AGAIN   11   /* process has not exited yet */
 #define ERR_BADCAP  9    /* no capability in that slot */
 #define ERR_NOMEM   12   /* out of kernel memory or factory budget */
 #define ERR_FAULT   14   /* a pointer argument isn't valid user memory */

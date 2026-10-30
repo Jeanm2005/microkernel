@@ -7,6 +7,7 @@
 #include <kernel/irq.h>
 #include <kernel/kprintf.h>
 #include <kernel/memory.h>
+#include <kernel/object.h>
 #include <kernel/mm.h>
 #include <kernel/panic.h>
 #include <kernel/pmm.h>
@@ -42,6 +43,8 @@ static bool map_stack(uint64_t root)
 
 static void free_process(struct process *p)
 {
+    if (p->exit_notification)
+        kobj_put(&p->exit_notification->obj);
     slab_free(&process_cache, p);
 }
 
@@ -169,6 +172,12 @@ void process_thread_gone(struct process *p)
     p->root = 0;
     cspace_clear(&p->cspace);
     p->exited = true;
+    if (p->exit_notification) {
+        struct notification *n = p->exit_notification;
+        p->exit_notification = NULL;
+        ntfn_signal(n, p->exit_bits);
+        kobj_put(&n->obj);
+    }
     struct thread *t;
     while ((t = waitq_pop(&p->exit_waiters)))
         sched_wake(t);

@@ -16,6 +16,7 @@
 
 struct thread;
 struct frame;
+struct notification;
 
 #define PROC_MAPPINGS 16   /* frames one process can have mapped at once */
 
@@ -50,6 +51,8 @@ struct process {
     uint64_t       run_ticks;      /* timer ticks its thread ran for, set at exit */
     int            refs;           /* the thread + whoever holds the pointer */
     bool           at_line_start;  /* for prefixing debug output with the name */
+    struct notification *exit_notification; /* held until teardown */
+    uint64_t exit_bits;
     struct waitq   exit_waiters;   /* kernel threads in process_wait() */
     struct cspace  cspace;         /* its capabilities; all dropped when it dies */
 };

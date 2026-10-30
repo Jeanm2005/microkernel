@@ -67,7 +67,8 @@ static struct process *run_system(const struct boot_info *boot, uint64_t mode)
 
 bool system_selftest_wanted(const char *name)
 {
-    return strcmp(name, "app-crash") == 0 || strcmp(name, "console-input") == 0;
+    return strcmp(name, "app-crash") == 0 || strcmp(name, "console-input") == 0 ||
+           strcmp(name, "driver-restart") == 0;
 }
 
 void system_selftest_boot(const struct boot_info *boot)
@@ -85,6 +86,13 @@ void system_selftest_boot(const struct boot_info *boot)
 
 bool system_selftest_run(const char *name, const struct boot_info *boot)
 {
+    if (strcmp(name, "driver-restart") == 0) {
+        uint64_t before = pmm_free_frames();
+        process_put(run_system(boot, ROOT_MODE_INIT_RESTART));
+        kassert(pmm_free_frames() == before);
+        kprintf("selftest: disk driver restarted; filesystem survived; no frames leaked\n");
+        return true;
+    }
     if (strcmp(name, "app-crash") == 0) {
         process_put(run_system(boot, ROOT_MODE_INIT_CRASH));
         kprintf("selftest: an application crashed; the root task and the console carried on\n");

@@ -26,3 +26,8 @@
 /* PCI vendor and device IDs we know about. */
 #define PCI_VENDOR_VIRTIO 0x1af4
 #define PCI_DEVICE_VIRTIO_BLK 0x1001 /* "transitional" (legacy-capable) block device */
+/* Restart support for the legacy virtio block device. The PCI server pins
+ * one DMA frame before DRIVER_OK. Only root may reset/release the device,
+ * after its old process has exited; this is not capability revocation. */
+#define PCI_PIN_DMA 5 /* w1=device, cap=frame; claimant only, one frame */
+#define PCI_RECOVER 6 /* w1=device; badge 0 only. Stop DMA, unbind IRQ, drop frame, release claim. */

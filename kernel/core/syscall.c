@@ -72,6 +72,10 @@ uint64_t syscall_handle(struct syscall_regs *r)
                                                           a[2], a[3]);
     case SYS_IRQ_GET:     return (uint64_t)sys_irq_get(cs, (int64_t)a[0], (int64_t)a[1], a[2]);
 
+    case SYS_PROC_WATCH: return (uint64_t)sys_proc_watch(cs, (int64_t)a[0], (int64_t)a[1], a[2]);
+    case SYS_PROC_POLL: return (uint64_t)sys_proc_poll(cs, (int64_t)a[0], &a[0]);
+    case SYS_IRQ_UNBIND: return (uint64_t)sys_irq_unbind(cs, (int64_t)a[0]);
+
     default:              return (uint64_t)-ERR_NOSYS;
     }
 }

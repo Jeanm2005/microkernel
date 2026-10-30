@@ -26,6 +26,7 @@
 #include <abi/boot.h>
 #include <abi/console.h>
 #include <abi/proto.h>
+#include <abi/pci.h>
 #include <abi/selftest.h>
 #include "ipc.h"
 #include "root.h"
@@ -51,6 +52,9 @@ struct program {
     int   ndevs;
     long  quota_objects, quota_pages;   /* both 0: no factory */
     long  priority, arg;
+    long badges[MAX_USES];
+    int restarts;
+    bool finished;
     long  proc;   /* our capability to its process */
     long  ep;     /* our (unbadged) capability to the endpoint it serves, or 0 */
 };
@@ -63,6 +67,7 @@ static int nmodules;
 
 static struct program progs[MAX_PROGRAMS];
 static int nprogs;
+static long child_events;
 static char manifest[2048];
 
 /* Who holds each badge on the console's endpoint (0 = us). */
@@ -266,6 +271,10 @@ static bool create(struct program *p, long *next_badge)
         printf("FAILED: creating %s: error %ld\n", p->name, p->proc);
         return false;
     }
+    if (sys_proc_watch(p->proc, child_events, 1ul << (p - progs))) {
+        printf("FAILED: watching %s\n", p->name);
+        return false;
+    }
     /* The server may receive on its endpoint and accept capabilities. */
     if (p->ep) {
         long r = sys_proc_give(p->proc, p->ep, SLOT_SERVE, CAP_READ | CAP_GRANT, 0);
@@ -278,7 +287,8 @@ static bool create(struct program *p, long *next_badge)
     /* Each client may only send, and everything it sends carries a badge
      * that is unique to it, so servers can tell clients apart. */
     for (int k = 0; k < p->nuses; k++) {
-        long badge = (*next_badge)++;
+        if (!p->badges[k]) p->badges[k] = (*next_badge)++;
+        long badge = p->badges[k];
         long r = sys_proc_give(p->proc, provider(p->uses[k])->ep, SLOT_USES + k,
                                CAP_WRITE | CAP_GRANT, badge);
         if (r) {
@@ -380,6 +390,8 @@ int init_main(long mode)
     printf("read %s: %d programs\n", file, nprogs);
 
     /* Our own authority has limits too. */
+    child_events = sys_obj_create(ROOT_SLOT_FACTORY, OBJ_NOTIFICATION);
+    if (child_events < 0) return 1;
     long image = module_slot("root.elf");
     check(sys_proc_create(ROOT_SLOT_FACTORY, image, ROOT_TASK_PRIORITY + 1, "x", 1) == -ERR_PERM,
           "can't create a process above its own priority");
@@ -389,6 +401,20 @@ int init_main(long mode)
      * capability (the kernel's leak check confirms its memory came back). */
     long unused = sys_proc_create(ROOT_SLOT_FACTORY, image, 1, "unused", 6);
     long code;
+    long write_proc = sys_cap_copy(unused, CAP_WRITE, 0);
+    check(write_proc > 0 && sys_proc_poll(write_proc, &code) == -ERR_PERM &&
+          sys_proc_watch(write_proc, child_events, 1) == -ERR_PERM,
+          "observing process exit requires a readable process capability");
+    sys_cap_delete(write_proc);
+    long ro_events = sys_cap_copy(child_events, CAP_READ, 0);
+    check(unused > 0 && sys_proc_watch(unused, child_events, 0) == -ERR_INVAL &&
+          sys_proc_watch(unused, ro_events, 1) == -ERR_PERM &&
+          sys_proc_watch(unused, child_events, 1) == 0 &&
+          sys_proc_watch(unused, child_events, 2) == 0,
+          "exit watches validate notification rights and signal bits");
+    sys_cap_delete(ro_events);
+    check(sys_proc_poll(unused, &code) == -ERR_INVAL,
+          "polling a process that was never started is refused");
     check(unused > 0 && sys_proc_wait(unused, &code) == -ERR_INVAL && sys_cap_delete(unused) == 0,
           "a process that was never started can be discarded");
 
@@ -408,10 +434,19 @@ int init_main(long mode)
         if (!create(&progs[i], &next_badge))
             return 1;
 
+    if (mode == ROOT_MODE_INIT_RESTART) {
+        struct program *disk = provider("blk");
+        if (!disk) return 1;
+        disk->arg = 1; /* only its first instance injects a fault */
+    }
+
     /* Everything we start runs below our priority, so nothing runs until
      * we block waiting below. */
     for (int i = 0; i < nprogs; i++) {
         sys_proc_start(progs[i].proc, progs[i].arg);
+        check(sys_proc_poll(progs[i].proc, &code) == -ERR_AGAIN &&
+              sys_proc_watch(progs[i].proc, child_events, 1) == -ERR_INVAL,
+              "a running child polls as pending and cannot change its watch");
         printf("started %s (priority %ld)\n", progs[i].name, progs[i].priority);
     }
 
@@ -425,18 +460,51 @@ int init_main(long mode)
         printf("output now goes through the console server\n");
     }
 
-    for (int i = 0; i < nprogs; i++) {
-        struct program *p = &progs[i];
-        if (p->provides)
-            continue;
-        long r = sys_proc_wait(p->proc, &code);
-        if (r == 0)
-            printf("%s exited with code %ld\n", p->name, code);
-        else if (r == -ERR_DEAD)
-            printf("%s was killed\n", p->name);
-        else
-            printf("FAILED: waiting for %s: error %ld\n", p->name, r);
+    int pending = 0;
+    for (int i = 0; i < nprogs; i++) if (!progs[i].provides) pending++;
+    while (pending) {
+        long bits;
+        if (sys_wait(child_events, &bits)) return 1;
+        for (int i = 0; i < nprogs; i++) {
+            struct program *p = &progs[i];
+            if (p->finished || !(bits & (1ul << i))) continue;
+            long r = sys_proc_poll(p->proc, &code);
+            if (r == -ERR_AGAIN) continue;
+            if (p->provides) {
+                /* This milestone supervises the disk driver. Other server
+                 * failures are reported, rather than restarted blindly. */
+                if (r != -ERR_DEAD || strcmp(p->provides, "blk") || p->restarts) {
+                    printf("FAILED: unexpected server exit: %s\n", p->name);
+                    return 1;
+                }
+                printf("observed disk driver fault after process teardown\n");
+                struct program *pc = provider("pci");
+                struct msg m = { .w = { PCI_FIND,
+                    PCI_VENDOR_VIRTIO << 16 | PCI_DEVICE_VIRTIO_BLK } };
+                if (!pc || sys_call(pc->ep, &m, 0) || m.w[0] < 0) return 1;
+                m = (struct msg){ .w = { PCI_RECOVER, m.w[0] } };
+                if (sys_call(pc->ep, &m, 0) || m.w[0]) return 1;
+                printf("stopped disk DMA and released its old buffers\n");
+                if (sys_cap_delete(p->proc)) return 1;
+                p->restarts++;
+                p->arg = 0;
+                if (!create(p, &next_badge) || sys_proc_start(p->proc, p->arg)) return 1;
+                printf("restarted blk with the same endpoint and client badges\n");
+            } else {
+                p->finished = true;
+                pending--;
+                if (r == 0) {
+                    printf("%s exited with code %ld\n", p->name, code);
+                    if (code) failures++;
+                } else if (r == -ERR_DEAD) {
+                    printf("%s was killed\n", p->name);
+                    if (mode != ROOT_MODE_INIT_CRASH || strcmp(p->name, "crasher")) failures++;
+                } else return 1;
+            }
+        }
     }
+    if (mode == ROOT_MODE_INIT_RESTART)
+        check(provider("blk")->restarts == 1, "disk driver restarted exactly once");
 
     printf_use_console(0);   /* the console is about to go away */
     for (int i = nprogs - 1; i >= 0; i--)

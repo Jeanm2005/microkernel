@@ -31,3 +31,4 @@ int64_t sys_ioport_sub(struct cspace *cs, int64_t factory, int64_t ioport, uint6
                        uint64_t count);
 /* The process is going away: free its I/O permission bitmap. */
 void ioport_release(struct process *p);
+int64_t sys_irq_unbind(struct cspace *cs, int64_t irq);

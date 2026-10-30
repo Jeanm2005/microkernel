@@ -114,6 +114,10 @@ run_case boot "" 1 \
     "[root] read system.manifest: 6 programs" \
     "[root] ok: can't create a process above its own priority" \
     "[root] ok: a process image must come from a module capability" \
+    "[root] ok: observing process exit requires a readable process capability" \
+    "[root] ok: exit watches validate notification rights and signal bits" \
+    "[root] ok: polling a process that was never started is refused" \
+    "[root] ok: a running child polls as pending and cannot change its watch" \
     "[root] ok: a process that was never started can be discarded" \
     "[root] console serves 'console'" \
     "[root] console drives 'com1'" \
@@ -142,6 +146,8 @@ run_case boot "" 1 \
     "[blk] disk: 2048 sectors of 512 bytes (1024 KiB)" \
     "[blk] ok: bound the disk's interrupt to a notification from its own quota" \
     "[blk] ok: DMA read/write round trip completed through IRQ notifications" \
+    "[blk] ok: a read-only IRQ capability cannot disconnect the driver" \
+    "[blk] ok: only the supervisor may reset a claimed device" \
     "[blk] done, 0 failure(s)" \
     "[fs] ok: block server rejects reads beyond disk capacity" \
     "[fs] ok: block server rejects chunks crossing a sector boundary" \
@@ -245,6 +251,20 @@ run_case console-input "selftest=console-input" 1 \
     "[reader] ok: the console received a line of input" \
     "[console] shutting down (" \
     "selftest: the console received input through IRQ 4" \
+    "kernel: init complete"
+
+run_case driver-restart "selftest=driver-restart" 1 \
+    "[blk] crashing during a filesystem request" \
+    "process: killed 'blk': PAGE FAULT (#PF)" \
+    "[root] observed disk driver fault after process teardown" \
+    "[root] stopped disk DMA and released its old buffers" \
+    "[root] restarted blk with the same endpoint and client badges" \
+    "[fs] disk driver died; retrying on its replacement" \
+    "[cat] End of the file: the second sector arrived intact." \
+    "[root] cat exited with code 0" \
+    "[root] ok: disk driver restarted exactly once" \
+    "[root] blk shut down" \
+    "selftest: disk driver restarted; filesystem survived; no frames leaked" \
     "kernel: init complete"
 
 run_case unknown-selftest "selftest=nonsense" 3 \

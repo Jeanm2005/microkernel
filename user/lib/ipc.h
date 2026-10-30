@@ -235,3 +235,22 @@ static inline long sys_irq_get(long factory, long irq_control, long line)
     long a[6] = { factory, irq_control, line, 0, 0, 0 };
     return syscall6(SYS_IRQ_GET, a);
 }
+static inline long sys_proc_watch(long proc, long ntfn, unsigned long bits)
+{
+    long a[6] = { proc, ntfn, (long)bits, 0, 0, 0 };
+    return syscall6(SYS_PROC_WATCH, a);
+}
+
+static inline long sys_proc_poll(long proc, long *code)
+{
+    long a[6] = { proc, 0, 0, 0, 0, 0 };
+    long r = syscall6(SYS_PROC_POLL, a);
+    if (!r) *code = a[0];
+    return r;
+}
+
+static inline long sys_irq_unbind(long irq)
+{
+    long a[6] = { irq, 0, 0, 0, 0, 0 };
+    return syscall6(SYS_IRQ_UNBIND, a);
+}

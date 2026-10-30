@@ -7,7 +7,7 @@ can crash and be restarted without taking the system down.
 
 See [docs/DESIGN.md](docs/DESIGN.md) for the architecture and milestones.
 
-**Status:** M8 of 10 done.
+**Status:** M9 of 10 done.
 
 - M0: boots via Limine on QEMU, serial console, memory map
 - M1: own GDT (Global Descriptor Table), TSS (Task State Segment) and IDT
@@ -35,6 +35,10 @@ See [docs/DESIGN.md](docs/DESIGN.md) for the architecture and milestones.
   a tiny read-only filesystem server and `cat` client print `hello.txt`
   from disk
 
+- M9: the root task watches child exits and restarts a faulting disk
+  driver once, preserving its service endpoint and client badges; the PCI
+  server pins DMA memory until reset, and the filesystem retries its read
+
 ## Build and run
 
 Requirements: `python3`, `gcc`, `binutils`, `make`, `git`, `xorriso`, `qemu-system-x86_64`
@@ -52,6 +56,7 @@ make run CMDLINE="selftest=stack-overflow" # a thread overflows into its guard p
 make run CMDLINE="selftest=user-pagefault" # a user process crashes; the kernel survives
 make run CMDLINE="selftest=ipc-server-dies" # a server dies mid-call; its client gets -ERR_DEAD
 make run CMDLINE="selftest=app-crash"       # one application crashes; the system carries on
+make run CMDLINE="selftest=driver-restart" # disk driver faults after submitting DMA; root restarts it
 make run CMDLINE="selftest=console-input"   # type a line and press Enter: it arrives by IRQ 4
 ```
 

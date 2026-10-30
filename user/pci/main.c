@@ -47,6 +47,7 @@ static struct device {
     uint16_t addr, vendor, device;
     uint8_t  class, subclass;
     long     owner;        /* badge + 1 of the client that claimed it, 0 = nobody */
+    long     dma_cap;      /* pins DMA RAM across a driver fault */
     long     irq_cap;      /* our IRQ capability, once made (a line is claimed once) */
 } devs[MAX_DEVICES];
 static int ndevs;
@@ -159,7 +160,7 @@ static long claim(struct device *d, long badge)
         return -ERR_EXIST;
     d->owner = badge + 1;
     uint32_t cmd = cfg_read32(d->addr, CFG_COMMAND);
-    cfg_write32(d->addr, CFG_COMMAND, cmd | CMD_IO_SPACE | CMD_BUS_MASTER);
+    outw(CFG_DATA, (uint16_t)(cmd | CMD_IO_SPACE | CMD_BUS_MASTER));
     return 0;
 }
 
@@ -204,6 +205,27 @@ static long irq(struct device *d, long *cap)
     return line;
 }
 
+/* Called only after the supervisor has observed process teardown. Memory
+ * stays pinned until bus mastering is disabled and the device is reset. */
+static long recover(struct device *d)
+{
+    if (d->vendor != PCI_VENDOR_VIRTIO || d->device != PCI_DEVICE_VIRTIO_BLK)
+        return -ERR_NOSYS;
+    uint32_t bar0 = cfg_read32(d->addr, CFG_BAR0);
+    if (!(bar0 & 1) || !(bar0 & ~3u)) return -ERR_INVAL;
+    uint16_t cmd = cfg_read16(d->addr, CFG_COMMAND);
+    outw(CFG_DATA, (uint16_t)(cmd & ~CMD_BUS_MASTER));
+    /* IO_WINDOW is our own capability, covering the firmware's BAR area. */
+    if (sys_ioport_enable(IO_WINDOW)) return -ERR_PERM;
+    uint16_t port = (uint16_t)(bar0 & ~3u);
+    outb(port + 0x12, 0);
+    if (inb(port + 0x12) != 0) return -ERR_AGAIN;
+    if (d->irq_cap && sys_irq_unbind(d->irq_cap)) return -ERR_INVAL;
+    if (d->dma_cap) { sys_cap_delete(d->dma_cap); d->dma_cap = 0; }
+    d->owner = 0;
+    return 0;
+}
+
 int main(void)
 {
     printf_use_console(CONSOLE);
@@ -237,8 +259,8 @@ int main(void)
         memset(reply, 0, sizeof reply);
         struct device *d = lookup(m.w[1]);
         long op = PROTO_OP(m.w[0]);
-        bool needs_claim = op == PCI_BAR || op == PCI_IRQ;
-        if ((op == PCI_CLAIM || needs_claim) && !d) {
+        bool needs_claim = op == PCI_BAR || op == PCI_IRQ || op == PCI_PIN_DMA;
+        if ((op == PCI_CLAIM || op == PCI_RECOVER || needs_claim) && !d) {
             reply[0] = -ERR_INVAL;
         } else if (needs_claim && d->owner != m.badge + 1) {
             reply[0] = -ERR_PERM;   /* claim it first */
@@ -256,17 +278,41 @@ int main(void)
             case PCI_IRQ:
                 reply[0] = irq(d, &send_cap);
                 break;
+            case PCI_PIN_DMA: {
+                long pages;
+                if (d->vendor != PCI_VENDOR_VIRTIO || d->device != PCI_DEVICE_VIRTIO_BLK)
+                    reply[0] = -ERR_NOSYS;
+                else if (d->dma_cap)
+                    reply[0] = -ERR_EXIST;
+                else if (m.cap <= 0 || sys_frame_info(m.cap, &pages) <= 0)
+                    reply[0] = -ERR_TYPE;
+                else {
+                    d->dma_cap = m.cap;
+                    m.cap = 0;
+                }
+                break;
+            }
+            case PCI_RECOVER:
+                reply[0] = m.badge ? -ERR_PERM : recover(d);
+                break;
             case PROTO_SHUTDOWN:
                 if (m.badge != 0) {
                     reply[0] = -ERR_PERM;
                     break;
                 }
+                for (int i = 0; i < ndevs; i++)
+                    if (devs[i].dma_cap && recover(&devs[i])) {
+                        reply[0] = -ERR_INVAL;
+                        break;
+                    }
+                if (m.cap > 0) sys_cap_delete(m.cap);
                 sys_reply(reply, 0);
-                return 0;
+                return reply[0] ? 1 : 0;
             default:
                 reply[0] = -ERR_NOSYS;
             }
         }
+        if (m.cap > 0) sys_cap_delete(m.cap);
         if (reply[0] < 0)
             send_cap = 0;
         replying = true;

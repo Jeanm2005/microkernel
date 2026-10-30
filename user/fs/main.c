@@ -10,6 +10,13 @@ static long disk_read(uint64_t sector, long offset, long count, void *out)
 {
     struct msg m = { .w = { BLK_READ, (long)sector, offset, count } };
     long r = sys_call(BLK, &m, 0);
+    /* A dead driver drops the in-flight call. The stable endpoint keeps
+     * this retry queued until root starts its replacement. */
+    if (r == -ERR_DEAD) {
+        printf("disk driver died; retrying on its replacement\n");
+        m = (struct msg){ .w = { BLK_READ, (long)sector, offset, count } };
+        r = sys_call(BLK, &m, 0);
+    }
     if (r) return r;
     if (m.w[0] != count) return m.w[0] < 0 ? m.w[0] : -ERR_INVAL;
     memcpy(out, &m.w[1], (size_t)count);

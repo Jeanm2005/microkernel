@@ -182,3 +182,18 @@ void ioport_release(struct process *p)
         p->io_allowed = NULL;
     }
 }
+int64_t sys_irq_unbind(struct cspace *cs, int64_t slot)
+{
+    struct cap *c;
+    int64_t err = cspace_lookup(cs, slot, KOBJ_IRQ, CAP_WRITE, &c);
+    if (err) return err;
+    struct irq *q = (struct irq *)c->obj;
+    uint64_t flags = irq_save();
+    arch_irq_mask(q->line);
+    struct notification *old = q->ntfn;
+    q->ntfn = NULL;
+    q->bits = 0;
+    irq_restore(flags);
+    if (old) kobj_put(&old->obj);
+    return 0;
+}

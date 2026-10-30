@@ -17,6 +17,7 @@ enum root_mode {
     /* The real job: start the system described by a manifest. */
     ROOT_MODE_INIT        = 8,  /* system.manifest */
     ROOT_MODE_INIT_CRASH  = 9,  /* crash.manifest: one application crashes */
+    ROOT_MODE_INIT_RESTART = 11, /* disk driver faults during a filesystem read */
     ROOT_MODE_INIT_INPUT  = 10, /* input.manifest: wait for a line of input */
 };
 
